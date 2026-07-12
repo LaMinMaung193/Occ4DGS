@@ -1,0 +1,47 @@
+# Stage B — recursive feedforward temporal deformation
+# See docs/design_doc_v2.md Section 2 for full derivation.
+
+reference_buffer:
+  mode: recursive              # confirmed: buffer always holds previous DEFORMED output,
+                                # never re-anchored to G_0 (design_doc_v2.md Section 0/2.1)
+
+motion_hypernet:
+  num_levels: 3                 # L, matches 4DGC/4D-GS default
+  grid_resolution: null          # tune during Phase 4 skeleton validation
+
+deform_heads:
+  phi_mu:  {hidden_dim: 128, num_layers: 2}
+  phi_r:   {hidden_dim: 128, num_layers: 2}
+  # No phi_s (scale) head, no compensated-Gaussian branch — confirmed dropped.
+
+# ---- Two-stage training schedule ----
+stage_1_warmup:
+  description: "Stage A frozen. Train only motion_hypernet + phi_mu + phi_r."
+  unroll_window: 2               # frames per truncated-BPTT step
+  epochs: 60
+  optimizer: adamw
+  lr: 1.0e-4
+  weight_decay: 0.01
+  lr_schedule: cosine
+  batch_size: 1
+  grad_accumulation_steps: 4      # effective batch 4
+  precision: amp_fp16
+
+stage_2_joint:
+  description: "Unfreeze Stage A. Joint fine-tune with 10x lower LR on Stage A params."
+  unroll_window: 3
+  epochs: 40
+  optimizer: adamw
+  lr_stage_a: 1.0e-5              # GaussianFormer3D params — 10x lower than temporal module
+  lr_temporal: 5.0e-5              # motion_hypernet + phi_mu + phi_r — decayed from stage 1
+  weight_decay: 0.01
+  lr_schedule: cosine
+  batch_size: 1
+  grad_accumulation_steps: 4
+  precision: amp_fp16
+  init_from: stage_1_warmup.best_checkpoint
+
+# Ablation configs derived from this file (Phase 9):
+#   - frozen_only.yaml       : stage_1_warmup only, no stage 2, used as the frozen-vs-joint ablation
+#   - window_len_2_vs_3.yaml : stage_2_joint with unroll_window: 2 instead of 3
+#   - n_g_12800.yaml         : stage_a config with num_gaussians: 12800, if VRAM allows

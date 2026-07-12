@@ -1,0 +1,35 @@
+# Stage A — GaussianFormer3D primitive Gaussian generation (run once per sequence, on frame 0)
+# See docs/design_doc_v2.md Section 1 for the full derivation of each field.
+
+num_gaussians: 6400          # N_g — assigned default, see README.md decision table
+gaussian_feature_dim: null   # d = 11 + num_semantic_classes, computed at init time
+
+camera_backbone:
+  type: resnet50_fpn         # reused from QG-Fusion, lighter than paper's ResNet101-DCN
+  pretrained: fcos3d_checkpoint  # TBD path, verify availability during Phase 0
+  image_resolution: [450, 800]   # [H, W], half of paper's 900x1600
+
+lidar_encoder:
+  type: voxel_feature_encoder
+  aggregated_sweeps: 10
+  voxel_size: [0.075, 0.075, 0.2]   # matches paper's best ablation (Table VIIb); revisit if
+                                     # VRAM forces coarser resolution during Phase 2 profiling
+
+pc_range: [-40, -40, -1, 40, 40, 5.4]   # MUST match Occ3D grid — see dataset_compute_addendum.md §3
+occ_voxel_size: [0.4, 0.4, 0.4]
+occ_grid_shape: [200, 200, 16]
+
+refinement:
+  num_blocks: 4               # sparse-conv -> LiDAR-guided 3D deformable attention -> MLP refine
+  deform_attn:
+    num_ref_points: null       # N_R1, tune in Phase 2 pilot run
+    num_sample_points: null    # N_R2, tune in Phase 2 pilot run
+
+training:
+  precision: amp_fp16
+  gradient_checkpointing: true
+  optimizer: adamw
+  weight_decay: 0.01
+  # Stage A is trained standalone only during Phase 2 (reproduction check).
+  # In Phase 5+ it is either frozen (Stage 1) or jointly fine-tuned at 1e-5 (Stage 2) —
+  # see configs/stage_b_temporal.yaml for the joint schedule.

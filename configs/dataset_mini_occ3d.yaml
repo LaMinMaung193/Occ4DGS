@@ -1,0 +1,30 @@
+# Dataset configuration — see docs/dataset_compute_addendum.md for full rationale
+
+nuscenes:
+  version: v1.0-mini
+  data_root: /media/user/Transcend/nuScenes/v1.0-mini   # self-contained, all 6 cams + LiDAR + radar
+  num_scenes: 10
+
+occupancy_gt:
+  source: occ3d-nuscenes
+  gt_root: /media/user/Transcend/data/occ3d/gts
+  pc_range: [-40, -40, -1, 40, 40, 5.4]
+  voxel_size: [0.4, 0.4, 0.4]
+  grid_shape: [200, 200, 16]
+  num_classes: 18   # 0-16 occupied, 17 = free/empty
+  use_camera_visibility_mask: true
+
+# Known gotcha (build the frame index around this, do not assume every frame has GT):
+known_gaps:
+  mini_train_missing_gt_indices: "0-38"   # confirmed from prior 3DGS-project findings
+  action: "tag each frame has_gt: bool; slice only contiguous valid-GT runs for BPTT windows"
+
+# Explicitly NOT used for this project (see dataset_compute_addendum.md §1):
+excluded_paths:
+  - /media/user/Transcend/data/nuscenes        # partial, CAM_BACK + LIDAR_TOP only
+  - /media/user/Transcend/data/nuscenes_cam    # camera-only extraction, unrelated project
+  - /media/user/Transcend/data123               # full trainval blobs, blobs 04/05 incomplete —
+                                                  # not needed since v1.0-mini is self-contained
+
+# Optional secondary GT (not primary path, available if a robustness check is wanted later):
+surroundocc_gt_root: /media/user/Transcend/data/surroundocc/samples

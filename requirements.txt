@@ -1,0 +1,16 @@
+# Pin exact versions once Phase 0 compatibility check (roadmap Phase 0, step 4) completes.
+# Baseline environment already confirmed working for QG-Fusion on this machine:
+#   Python 3.8, CUDA 12.8, spconv==2.3.6 (cu120)
+# Do not assume GaussianFormer3D's own requirements.txt matches this exactly — verify first.
+
+torch                 # version TBD after compatibility check with GaussianFormer3D repo
+torchvision
+spconv==2.3.6
+nuscenes-devkit
+mmcv                  # version TBD — GaussianFormer3D dependency, check against CUDA 12.8
+mmdet3d               # version TBD
+numpy
+pyyaml
+wandb
+tqdm
+open3d                # for Gaussian position scatter-plot sanity checks (Phase 2/4)

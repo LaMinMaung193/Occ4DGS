@@ -1,0 +1,30 @@
+# Data (symlinked from external drive, never versioned)
+data/*
+!data/README.md
+
+# Checkpoints / large artifacts
+experiments/**/checkpoints/
+experiments/**/*.pth
+experiments/**/*.ckpt
+*.pth
+*.ckpt
+
+# Weights & Biases
+wandb/
+
+# Python
+__pycache__/
+*.pyc
+*.egg-info/
+venv/
+.venv/
+
+# Jupyter
+.ipynb_checkpoints/
+
+# OS
+.DS_Store
+
+# Editor
+.vscode/
+.idea/

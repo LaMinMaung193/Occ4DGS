@@ -77,3 +77,21 @@ python unittest_DFA3D.py
   Environment fully verified. Proceeding to Phase 1 (frame index & data
   loading, `docs/IMPLEMENTATION_ROADMAP.md`). `requirements.txt` updated
   with exact working versions.
+
+  ## [Phase 0] Run ID: 2026-07-14-pc-range-verification
+
+- Git commit: (fill in after this commit)
+- Config file(s): configs/dataset_mini_occ3d.yaml, configs/stage_a_gaussianformer3d.yaml
+- Command: np.load() inspection of data/occ3d_gts/scene-0061/023c4df2.../labels.npz
+- Results:
+  - semantics: shape (200,200,16), dtype uint8, range 0-17 — matches configured
+    pc_range=[-40,-40,-1,40,40,5.4], voxel_size=0.4m, 18 classes. No mismatch.
+  - mask_lidar: shape (200,200,16), dtype uint8, binary — LiDAR visibility mask,
+    not previously accounted for in configs; candidate input for L_lidar (Phase 6).
+  - mask_camera: shape (200,200,16), dtype uint8, binary — camera visibility mask,
+    matches configs/dataset_mini_occ3d.yaml's use_camera_visibility_mask flag.
+- Observations: Occ3D-nuScenes ships semantics + two SEPARATE binary masks in one
+  labels.npz, not a combined mask or an embedded special value. src/datasets/occ3d_gt.py
+  (Phase 1) needs to load and return all three arrays, not just semantics.
+- Decision / next step: Phase 0 fully complete (all 5 exit checklist items closed).
+  Proceeding to Phase 1 (frame index & data loading).

@@ -1,16 +1,30 @@
-# Pin exact versions once Phase 0 compatibility check (roadmap Phase 0, step 4) completes.
-# Baseline environment already confirmed working for QG-Fusion on this machine:
-#   Python 3.8, CUDA 12.8, spconv==2.3.6 (cu120)
-# Do not assume GaussianFormer3D's own requirements.txt matches this exactly — verify first.
+# Verified working on RTX 3090 24GB, driver CUDA 12.8, conda env python 3.8.16
+# See EXPERIMENT_LOG.md "2026-07-12-env-verification" for the full derivation
+# and the two undocumented gaps (DFA3D c++17 patch, mmseg ftfy/regex requirement).
 
-torch                 # version TBD after compatibility check with GaussianFormer3D repo
-torchvision
-spconv==2.3.6
+torch==2.1.0
+torchvision==0.16.0
+torchaudio==2.1.0
+mmcv==2.1.0
+mmdet==3.2.0
+mmsegmentation==1.2.1
+mmdet3d==1.3.0
+spconv-cu120
+timm
+ftfy
+regex
+
+# Not part of the GaussianFormer3D stack itself, but needed for Occ4DGS's own code:
 nuscenes-devkit
-mmcv                  # version TBD — GaussianFormer3D dependency, check against CUDA 12.8
-mmdet3d               # version TBD
 numpy
 pyyaml
 wandb
 tqdm
 open3d                # for Gaussian position scatter-plot sanity checks (Phase 2/4)
+
+# Custom CUDA extensions (installed via `pip install -e .`, not listed here as
+# pinned versions since they're built from source — see EXPERIMENT_LOG.md for
+# the exact commands):
+#   GaussianFormer3D/model/encoder/gaussian_encoder/ops
+#   GaussianFormer3D/model/head/localagg
+#   3D-deformable-attention/DFA3D  (with the c++17 setup.py patch applied)

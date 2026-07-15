@@ -95,3 +95,53 @@ python unittest_DFA3D.py
   (Phase 1) needs to load and return all three arrays, not just semantics.
 - Decision / next step: Phase 0 fully complete (all 5 exit checklist items closed).
   Proceeding to Phase 1 (frame index & data loading).
+
+
+  ## [Phase 1] Run ID: 2026-07-14-frame-index-and-gt-loader
+
+- Git commit: (fill in after commit)
+- Config file(s): configs/dataset_mini_occ3d.yaml
+- Command: scripts/build_frame_index.py, scripts/spot_check_dataloader.py
+- Hardware: N/A (CPU-only, dataset indexing)
+- Hypothesis / what this run tests:
+  Build a reliable has_gt-tagged frame index across all 10 scenes before any
+  model touches the data (Phase 1, roadmap steps 1-4).
+- Results:
+
+  | scene | #frames | #has_gt (first pass) | #has_gt (after fix) | max_run (after fix) |
+  |---|---|---|---|---|
+  | scene-0061 | 39 | 39 | 39 | 39 |
+  | scene-0103 | 40 | 40 | 40 | 40 |
+  | scene-0553 | 41 | 0 | 41 | 41 |
+  | scene-0655 | 41 | 0 | 41 | 41 |
+  | scene-0757 | 41 | 41 | 41 | 41 |
+  | scene-0796 | 40 | 40 | 40 | 40 |
+  | scene-0916 | 41 | 0 | 41 | 41 |
+  | scene-1077 | 41 | 41 | 41 | 41 |
+  | scene-1094 | 40 | 40 | 40 | 40 |
+  | scene-1100 | 40 | 0 | 40 | 40 |
+
+- Observations:
+  First pass showed a clean ALL-OR-NOTHING pattern: 6 scenes at 100% GT
+  coverage, 4 scenes at exactly 0%. Root cause (confirmed by direct file
+  check, not guessed): this Occ3D-nuScenes GT dump uses TWO different
+  on-disk layouts depending on scene:
+    (a) data/occ3d_gts/<scene>/<token>/labels.npz   (subfolder + labels.npz)
+    (b) data/occ3d_gts/<scene>/<token>.npz           (flat file)
+  scene-0061, 0103, 0757, 0796, 1077, 1094 use (a); scene-0553, 0655, 0916,
+  1100 use (b). No correlation found with log location (boston-seaport vs
+  singapore) or log file naming that would predict which convention a scene
+  uses -- likely an artifact of how this GT release was assembled/merged
+  from multiple download batches, not a semantic pattern to rely on.
+  Fixed by checking both path candidates in load_occ3d_labels() rather than
+  assuming one convention. After the fix: 100% GT coverage across all 10
+  scenes (better than the old 3DGS-project "mini_train index 39 gap" would
+  have suggested -- that gap does not appear to apply to this exact set of
+  10 scenes/this GT release, or was specific to a different data path).
+- Bugs / issues encountered & fixes: see Observations above.
+- Decision / next step:
+  Phase 1 exit checklist fully satisfied (all 10 scenes have full-length
+  contiguous valid-GT runs, well above the 3-frame minimum needed for
+  Stage 2's unroll window). experiments/phase1_frame_index.json is now the
+  source of truth for all later phases -- do not recompute this differently
+  elsewhere. Proceeding to Phase 2 (Stage A standalone reproduction).

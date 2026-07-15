@@ -32,11 +32,17 @@ pattern). Log every run, pass or fail, in `EXPERIMENT_LOG.md` using the template
 symlinked `data/`.
 
 **Exit checklist:**
-- [ ] GaussianFormer3D repo runs its own demo end-to-end in the local environment
-- [ ] `requirements.txt` has concrete, tested version numbers (no `TBD` left)
-- [ ] All 10 mini scene names confirmed present in `data/occ3d/gts/`
-- [ ] `pc_range` / voxel size match verified in writing (paste output into EXPERIMENT_LOG.md)
-- [ ] Repo pushed to GitHub with this exit state tagged
+- [*] GaussianFormer3D repo runs its own demo end-to-end in the local environment
+- [x] `requirements.txt` has concrete, tested version numbers (no `TBD` left)
+- [x] All 10 mini scene names confirmed present in `data/occ3d/gts/`
+- [x] `pc_range` / voxel size match verified in writing (paste output into EXPERIMENT_LOG.md)
+- [x] Repo pushed to GitHub with this exit state tagged
+
+Edited for First checklist:[*]
+- GaussianFormer3D repo's core imports (mmdet3d/mmcv/spconv/DFA3D/LocalAggregator/
+- GaussianOccEncoder3D) succeed cleanly; unittest_DFA3D.py passes. Full eval.py/train.py
+- run against author-provided weights+data was NOT performed (deferred — not required
+- since Occ4DGS writes its own Stage A training loop rather than reusing theirs as-is).
 
 **Git tag:** `v0.0-phase0-env-verified`
 

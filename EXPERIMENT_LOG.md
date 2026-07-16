@@ -145,3 +145,37 @@ python unittest_DFA3D.py
   Stage 2's unroll window). experiments/phase1_frame_index.json is now the
   source of truth for all later phases -- do not recompute this differently
   elsewhere. Proceeding to Phase 2 (Stage A standalone reproduction).
+
+
+  ## [Phase 2] Run ID: 2026-07-16-depth-gt-generation
+
+- Git commit: (fill in after commit)
+- Config file(s): N/A -- standalone preprocessing script
+- Command: scripts/generate_depth_gt.py
+- Hardware: RTX 3090 24GB (unused -- pure CPU/numpy), ~2424 files, all 10 scenes
+- Hypothesis / what this run tests:
+  Generate BEVDepth-style depth_gt/*.bin files from our own v1.0-mini LiDAR sweeps,
+  replacing GaussianFormer3D's SharePoint-downloaded depth_gt (not available for
+  our Occ3D-mini setup). Files written to data/nuscenes_mini/depth_gt/ (Option A:
+  onto the external drive, sibling of samples/, matching LoadMultiViewDepthFromFiles'
+  expected layout unmodified).
+- Results:
+  2424 files written (10 scenes x ~40.4 avg frames x 6 cameras). Spot-checked 8 files
+  across multiple scenes/cameras: point counts 2100-4600 per file, u in [0,1600],
+  v in [0,900], depth in [3-90]m. All physically plausible.
+- Bugs / issues encountered & fixes:
+  FIRST ATTEMPT WAS WRONG -- silently produced empty/garbage files (e.g. CAM_BACK_LEFT
+  on scene-0061 frame 0 returned npts=0, u/v in range [-0.9,-0.4] instead of
+  [0,1600]/[0,900]). Root cause: built cam2img as the intrinsic matrix K directly
+  embedded in a 4x4, then used it as if it were the img2global multiplier -- but
+  GaussianFormer3D's own dataset/utils.py get_img2global() actually uses
+  img2cam = inv(cam2img) = K^-1 in that position (img2global = ego2global @ cam2ego
+  @ img2cam). Copying their variable NAME (cam2img) without verifying which matrix
+  role it actually plays in their formula produced numerically-plausible-looking
+  code that was nonetheless wrong. Fixed by matching their formula term-for-term,
+  confirmed via direct debug printout of u/v ranges before and after the fix.
+- Decision / next step:
+  depth_gt generation validated. Ready to move to Phase 2's config override
+  (pc_range/voxel_size/backbone swapped for Occ3D) and the first actual Stage A
+  "run on frame 0" step, now that occ4dgs_dataset.py + generate_depth_gt.py both
+  produce verified-correct inputs.

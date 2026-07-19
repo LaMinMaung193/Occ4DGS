@@ -14,6 +14,17 @@ timm
 ftfy
 regex
 
+# Needed for GaussianFormer3D's loss/__init__.py -> misc.tb_wrapper -> tensorboard
+# import chain, which was previously silently supplied by a broken ~/.local
+# tensorflow 2.5.0 leftover (see EXPERIMENT_LOG.md "2026-07-19-stage-a-training-path-validated").
+# Run with PYTHONNOUSERSITE=1 to avoid that leak interfering.
+termcolor
+urllib3
+cachetools
+absl-py
+google-auth
+markdown
+
 # Not part of the GaussianFormer3D stack itself, but needed for Occ4DGS's own code:
 nuscenes-devkit
 numpy

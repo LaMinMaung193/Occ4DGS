@@ -179,3 +179,46 @@ python unittest_DFA3D.py
   (pc_range/voxel_size/backbone swapped for Occ3D) and the first actual Stage A
   "run on frame 0" step, now that occ4dgs_dataset.py + generate_depth_gt.py both
   produce verified-correct inputs.
+
+  ## [Phase 2] Run ID: 2026-07-18-stage-a-first-successful-forward-pass
+
+- Git commit: (fill in after commit)
+- Config file(s): GaussianFormer3D/config/occ4dgs_mini_occ3d_gs6400.py
+- Command: scripts/run_stage_a_frame0.py, scene-0061, frame 0
+- Hardware: RTX 3090 24GB, peak VRAM 2.84 GB (single sample, batch=1, no gradient/training yet)
+- Hypothesis / what this run tests:
+  Confirm GaussianFormer3D's BEVSegmentorLiDAR3D runs a full forward pass end-to-end
+  on our own Occ3D-mini dataset adapter, using N_g=6400, ResNet101-DCN, occ_annotation="occ3d".
+- Results: SUCCESS. Full forward pass completes. Output keys include pred_occ, gaussian,
+  sampled_xyz, sampled_label, occ_mask -- exactly the expected structure. Peak VRAM 2.84GB,
+  far under the 24GB budget (single sample, eval mode, no backward pass yet -- training will
+  cost substantially more due to activations/gradients, revisit VRAM budget once training loop exists).
+- Bugs / issues encountered & fixed (chronological, this phase):
+  1. results['lidar_path'] missing (separate key from pts_filename, both required)
+  2. results['sweeps'] missing -- ported obtain_sensor2top logic from make_gf3d_infos.py
+  3. LoadOccupancyOcc3d occ_path built with wrong root (missing occ3d_gts segment)
+  4. GaussianFormer3D custom module registry never triggered -- needed `import model`
+  5. _delete_=True is an mmengine config-merge directive, meaningless without _base_
+     inheritance -- removed from img_backbone, spconv_layer, head.empty_args/cuda_kwargs
+  6. img_neck was a partial override (start_level=1 only) relying on _base_/model.py's
+     FPN definition we don't inherit -- wrote the full FPN dict explicitly
+  7. use_deformable_func defaults False, causes UnboundLocalError deep in
+     deformable_module_3d.py -- set True explicitly
+  8. use_camera_embed defaults False -- set True to match proven SurroundOcc config intent
+  9. d_bound duplicate keyword argument (pasted twice in deformable_model dict) -- removed dup
+  10. image_wh, occ_xyz, occ_label, occ_cam_mask all missing from our hand-built metas dict
+      in run_stage_a_frame0.py's to_batch_of_one() -- added all four with correct dtypes
+      (occ_label as .long(), occ_cam_mask as .bool())
+  11. residual_mode defaults "add" (128-dim output), but FFN was sized for "cat" (256-dim
+      input) per the proven config's implied intent -- set residual_mode="cat" explicitly
+  Root cause common to most of these: writing occ4dgs_mini_occ3d_gs6400.py WITHOUT _base_
+  inheritance (deliberate choice to avoid silently importing unverified SurroundOcc/2D
+  defaults) means every field the original config relied on _base_ to supply had to be
+  identified and set explicitly, one crash at a time. In hindsight, a full field-by-field
+  diff against class __init__ signatures (as eventually done for DeformableFeatureAggregation3D)
+  earlier would have caught several of these at once rather than sequentially.
+- Decision / next step:
+  Phase 2 step 2 (run on one scene's frame 0) COMPLETE. Next: Phase 2 step 3 (visualize
+  Gaussian positions -- scatter plot, scale/opacity histograms; check for position
+  collapse, Z-axis collapse, scale saturation per roadmap exit checklist), then step 4
+  (repeat across all 10 scenes' frame 0, confirm no scene degenerates).

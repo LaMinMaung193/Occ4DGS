@@ -115,7 +115,9 @@ class Occ4DGSDataset(Dataset):
         return dict(
             sample_idx=sample_token,
             pts_filename=sensor_paths[LIDAR_NAME],
-            occ_path=occ_path_rel,          # relative; joined with occ3d_gts_root by the transform
+            lidar_path=sensor_paths[LIDAR_NAME],    # <-- ADD THIS: same file, separate key some transforms 
+            sweeps=self._get_sweeps(sample_token),   # <-- ADD THIS
+            occ_path=occ_path_rel,
             timestamp=sample["timestamp"] / 1e6,
             ego2global=ego2global,
             lidar2global=lidar2global,
@@ -127,6 +129,49 @@ class Occ4DGSDataset(Dataset):
             ego2lidar=ego2lidar,
             scene_token=scene_name,
         )
+
+
+    def _get_sweeps(self, sample_token, max_sweeps=10):
+        """Build the sweeps list LoadPointsFromMultiSweepsLiDAR expects: each entry needs
+        data_path, timestamp (RAW microseconds -- the transform itself divides by 1e6,
+        matching their own get_data_info convention, do not pre-convert here), and the
+        sensor2lidar rotation/translation chaining the sweep's LiDAR frame into the
+        CURRENT frame's LiDAR frame. Logic ported from GaussianFormer3D's
+        tools/make_gf3d_infos.py obtain_sensor2top(), adapted to call nuscenes-devkit
+        directly instead of reading from their pkl."""
+        sample = self.nusc.get("sample", sample_token)
+        cur_lidar_sd = self.nusc.get("sample_data", sample["data"][LIDAR_NAME])
+        cur_lidar_calib = self.nusc.get("calibrated_sensor", cur_lidar_sd["calibrated_sensor_token"])
+        cur_lidar_pose = self.nusc.get("ego_pose", cur_lidar_sd["ego_pose_token"])
+
+        l2e_r_mat = Quaternion(cur_lidar_calib["rotation"]).rotation_matrix
+        l2e_t = np.array(cur_lidar_calib["translation"])
+        e2g_r_mat = Quaternion(cur_lidar_pose["rotation"]).rotation_matrix
+        e2g_t = np.array(cur_lidar_pose["translation"])
+
+        sweeps = []
+        sd_rec = cur_lidar_sd
+        while len(sweeps) < max_sweeps and sd_rec["prev"] != "":
+            sd_rec = self.nusc.get("sample_data", sd_rec["prev"])
+            cs_record = self.nusc.get("calibrated_sensor", sd_rec["calibrated_sensor_token"])
+            pose_record = self.nusc.get("ego_pose", sd_rec["ego_pose_token"])
+
+            l2e_r_s_mat = Quaternion(cs_record["rotation"]).rotation_matrix
+            l2e_t_s = np.array(cs_record["translation"])
+            e2g_r_s_mat = Quaternion(pose_record["rotation"]).rotation_matrix
+            e2g_t_s = np.array(pose_record["translation"])
+
+            R = (l2e_r_s_mat.T @ e2g_r_s_mat.T) @ (np.linalg.inv(e2g_r_mat).T @ np.linalg.inv(l2e_r_mat).T)
+            T = (l2e_t_s @ e2g_r_s_mat.T + e2g_t_s) @ (np.linalg.inv(e2g_r_mat).T @ np.linalg.inv(l2e_r_mat).T)
+            T -= e2g_t @ (np.linalg.inv(e2g_r_mat).T @ np.linalg.inv(l2e_r_mat).T) + l2e_t @ np.linalg.inv(l2e_r_mat).T
+
+            sweeps.append({
+                "data_path": os.path.join(self.nusc.dataroot, sd_rec["filename"]),
+                "timestamp": sd_rec["timestamp"],          # RAW microseconds, matches their convention
+                "sensor2lidar_rotation": R.T,
+                "sensor2lidar_translation": T,
+            })
+        return sweeps
 
     def __getitem__(self, idx):
         scene_name, sample_token, occ_path_rel = self.samples[idx]

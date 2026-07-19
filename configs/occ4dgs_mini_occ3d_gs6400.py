@@ -3,6 +3,18 @@
 # EXPERIMENT_LOG.md Phase 2), NOT inheriting _base_/misc.py or _base_/model.py --
 # those are unverified and could silently carry SurroundOcc-specific defaults.
 
+
+optimizer = dict(
+    optimizer=dict(
+        type="AdamW", lr=1e-4, weight_decay=0.01,
+    ),
+    paramwise_cfg=dict(
+        custom_keys={
+            'img_backbone': dict(lr_mult=0.1)}
+    )
+)
+grad_max_norm = 35
+max_epochs = 24
 pc_range = [-40.0, -40.0, -1.0, 40.0, 40.0, 5.4]   # Occ3D range, confirmed Phase 0 + safe_ops.py pc_range_3
 scale_range = [0.01, 1.8]
 xyz_coordinate = 'cartesian'

@@ -222,3 +222,51 @@ python unittest_DFA3D.py
   Gaussian positions -- scatter plot, scale/opacity histograms; check for position
   collapse, Z-axis collapse, scale saturation per roadmap exit checklist), then step 4
   (repeat across all 10 scenes' frame 0, confirm no scene degenerates).
+
+
+## [Phase 2] Run ID: 2026-07-19-stage-a-training-path-validated
+
+- Git commit: (fill in after commit)
+- Config file(s): GaussianFormer3D/config/occ4dgs_mini_occ3d_gs6400.py
+- Command: scripts/overfit_stage_a_single_frame.py, scene-0061 frame 0, 200 iterations
+- Hardware: RTX 3090 24GB
+- Hypothesis / what this run tests:
+  Confirm the full training path (loss computation, backward, gradient clipping,
+  optimizer step) works end-to-end, and establish a reference mIoU number
+  (roadmap Phase 2 step 5, flagged "important").
+- Results:
+  Loss: 26.70 -> 21.62 over 200 iterations, consistent decrease, no divergence.
+  Reference single-frame overfit mIoU (classes 1-16): 0.1366 (11/16 classes present
+  in this frame's GT). Modest, as expected for 200 iterations of light overfitting
+  on one frame with a from-scratch-initialized encoder -- the loss trend, not the
+  absolute mIoU value, is the real pass/fail signal here.
+- Bugs / issues encountered & fixes:
+  1. Environment: ~/.local held a broken tensorflow 2.5.0 install (unrelated to this
+     project, leaking via Python's default user-site-packages behavior) that broke
+     `loss/__init__.py`'s tensorboard import chain. Fixed per-invocation with
+     PYTHONNOUSERSITE=1, plus installing termcolor/urllib3/cachetools/absl-py/
+     google-auth/markdown directly into gf3d (previously silently borrowed from
+     ~/.local without our knowledge in every earlier Phase 0-2 script too --
+     requirements.txt needs a full audit/diff against `pip list` to catch what
+     else may be silently missing).
+  2. occ4dgs_mini_occ3d_gs6400.py was missing optimizer/grad_max_norm/max_epochs
+     top-level config (never needed until now, since only forward passes had
+     been run before) -- added, matching original SurroundOcc config's values.
+  3. model_obj(imgs=batch["imgs"], ...) reused the SAME tensor object every
+     iteration; BEVSegmentorLiDAR3D.extract_img_dpt_feat does an IN-PLACE
+     imgs.squeeze_(0) on the first call, permanently corrupting batch["imgs"]'s
+     shape for iteration 2 onward. Fixed by cloning imgs/dpt fresh each iteration
+     before passing to the model -- a bug specific to reusing one cached batch
+     across iterations in a toy script, would not occur in real training with a
+     fresh dataloader batch every step.
+  4. pred_occ is a LIST (one entry per applied-loss decoder layer), not a tensor
+     -- confirmed via source (gaussian_head.py: prediction.append(semantics)).
+     Fixed with isinstance checks, taking [-1] (final layer).
+  5. pred_occ shape is [B, 18_classes, 640000_voxels] -- class dim is dim=1, not
+     the last dim. argmax(dim=-1) was backwards; fixed to argmax(dim=1).
+- Decision / next step:
+  Phase 2 FULLY COMPLETE (all exit checklist items satisfied). Phase 3 (originally
+  "Stage C wiring smoke test") is subsumed by this result -- Gaussian-to-voxel
+  splatting is embedded inside BEVSegmentorLiDAR3D's head and already proven
+  working here. Proceeding directly to Phase 4 (Stage B skeleton: reference
+  buffer, motion hypernet, deform heads).

@@ -8,7 +8,19 @@ writing and professor check-ins.
 
 | Run ID | Phase | N_g | Window | Stage | LR | Overall mIoU | Overall IoU | VRAM peak | Notes |
 |---|---|---|---|---|---|---|---|---|---|
-| 2026-07-12-env-verification | 0 | — | — | — | — | — | — | — | env verified, see entry below |
+| 2026-07-12-env-verification | 0 | — | — | — | — | — | — | — | env verified |
+| 2026-07-14-pc-range-verification | 0 | — | — | — | — | — | — | — | GT format confirmed, dual mask (lidar+camera) discovered |
+| 2026-07-14-frame-index-and-gt-loader | 1 | — | — | — | — | — | — | — | 100% GT coverage all 10 scenes, dual on-disk layout bug found+fixed |
+| 2026-07-16-depth-gt-generation | 2 | — | — | — | — | — | — | — | 2424 depth files generated, cam2img/img2cam bug found+fixed |
+| 2026-07-18-stage-a-first-successful-forward-pass | 2 | 6400 | 1 (single frame) | eval only | n/a | n/a | n/a | 2.84 GB | first full forward pass, 11 bugs resolved |
+| 2026-07-19-stage-a-training-path-validated | 2 | 6400 | 1 (single frame) | Stage A only, overfit | 1e-4 AdamW | 0.1366 (single-frame overfit) | — | 2.84 GB | training path validated, loss 26.70→21.62/200 iters |
+
+**Note on commit history:** a few commits don't map to a distinct log entry above, since they
+were formatting/checklist-wording fixes rather than new runs: `ea1f404` (corrected Phase 0
+checklist wording), `d9234da` (scene coverage + pc_range scripts, folded into the
+2026-07-14-pc-range-verification entry above), `ab33fcf`/`51f85f8` (env-verification
+finalization, folded into the 2026-07-12/14 entries above), `f3f6cad` (log formatting cleanup).
+Full history: `git log --oneline` in the repo.
 
 ---
 
@@ -16,10 +28,10 @@ writing and professor check-ins.
 
 ## [Phase 0] Run ID: 2026-07-12-env-verification
 
-- **Git commit:** (fill in after this commit)
+- **Git commit:** `14f6f1a` (tag: `v0.0-phase0-env-verified`)
 - **Config file(s):** N/A — environment setup, no training config yet
 - **Command:**
-```bash 
+```bash
 conda create -n gf3d python=3.8.16
 pip install torch==2.1.0 torchvision==0.16.0 torchaudio==2.1.0 --index-url https://download.pytorch.org/whl/cu121
 pip install openmim
@@ -34,8 +46,8 @@ git clone https://github.com/lunarlab-gatech/GaussianFormer3D.git
 cd GaussianFormer3D/model/encoder/gaussian_encoder/ops && pip install -e . && cd -
 cd GaussianFormer3D/model/head/localagg && pip install -e . && cd -
 git clone https://github.com/IDEA-Research/3D-deformable-attention.git
-edited 3D-deformable-attention/DFA3D/setup.py: c++14 -> c++17
-(both extra_compile_args['cxx'] and ['nvcc'])
+# edited 3D-deformable-attention/DFA3D/setup.py: c++14 -> c++17
+# (both extra_compile_args['cxx'] and ['nvcc'])
 cd 3D-deformable-attention/DFA3D
 rm -rf build/ dfa3D.egg-info/
 bash setup.sh 0
@@ -59,54 +71,56 @@ python unittest_DFA3D.py
 
 - **Observations:**
   Two undocumented gaps beyond the repo's own `docs/installation.md`:
-  1. DFA3D's `setup.py` hardcoded `-std=c++14` in both
-     `extra_compile_args['cxx']` and `['nvcc']`, incompatible with torch 2.1's
-     C++17-required ATen headers (`#error C++17 or later compatible compiler
-     is required to use ATen`). Fixed by editing both occurrences to
-     `c++17`, then `rm -rf build/ dfa3D.egg-info/` before rebuilding to clear
-     stale compiled objects.
+  1. DFA3D's `setup.py` hardcoded `-std=c++14` in both `extra_compile_args['cxx']`
+     and `['nvcc']`, incompatible with torch 2.1's C++17-required ATen headers
+     (`#error C++17 or later compatible compiler is required to use ATen`). Fixed
+     by editing both occurrences to `c++17`, then `rm -rf build/ dfa3D.egg-info/`
+     before rebuilding to clear stale compiled objects.
   2. `mmsegmentation` 1.2.1's top-level `__init__` eagerly imports its full
      backbone zoo (BEiT etc.), which needs `ftfy` + `regex` for CLIP-style
      tokenization even though this project doesn't use those backbones.
      Fixed with `pip install ftfy regex`.
-  `unittest_DFA3D.py` took ~1hr wall-clock with no console output —
-  consistent with a gradcheck-style float64 numerical verification, not a
-  hang (confirmed no zombie process via `ps aux`, no OOM in `dmesg`).
+
+  `unittest_DFA3D.py` took ~1hr wall-clock with no console output — consistent
+  with a gradcheck-style float64 numerical verification, not a hang (confirmed
+  no zombie process via `ps aux`, no OOM in `dmesg`).
 - **Bugs / issues encountered & fixes:** see Observations above.
 - **Decision / next step:**
   Environment fully verified. Proceeding to Phase 1 (frame index & data
-  loading, `docs/IMPLEMENTATION_ROADMAP.md`). `requirements.txt` updated
-  with exact working versions.
+  loading). `requirements.txt` updated with exact working versions.
 
-  ## [Phase 0] Run ID: 2026-07-14-pc-range-verification
+---
 
-- Git commit: (fill in after this commit)
-- Config file(s): configs/dataset_mini_occ3d.yaml, configs/stage_a_gaussianformer3d.yaml
-- Command: np.load() inspection of data/occ3d_gts/scene-0061/023c4df2.../labels.npz
-- Results:
-  - semantics: shape (200,200,16), dtype uint8, range 0-17 — matches configured
-    pc_range=[-40,-40,-1,40,40,5.4], voxel_size=0.4m, 18 classes. No mismatch.
-  - mask_lidar: shape (200,200,16), dtype uint8, binary — LiDAR visibility mask,
-    not previously accounted for in configs; candidate input for L_lidar (Phase 6).
-  - mask_camera: shape (200,200,16), dtype uint8, binary — camera visibility mask,
-    matches configs/dataset_mini_occ3d.yaml's use_camera_visibility_mask flag.
-- Observations: Occ3D-nuScenes ships semantics + two SEPARATE binary masks in one
-  labels.npz, not a combined mask or an embedded special value. src/datasets/occ3d_gt.py
+## [Phase 0] Run ID: 2026-07-14-pc-range-verification
+
+- **Git commit:** `c7721ea` (tag: `v0.1-phase0-complete`)
+- **Config file(s):** `configs/dataset_mini_occ3d.yaml`, `configs/stage_a_gaussianformer3d.yaml`
+- **Command:** `np.load()` inspection of `data/occ3d_gts/scene-0061/023c4df2.../labels.npz`
+- **Results:**
+  - `semantics`: shape `(200,200,16)`, dtype uint8, range 0-17 — matches configured
+    `pc_range=[-40,-40,-1,40,40,5.4]`, voxel_size=0.4m, 18 classes. No mismatch.
+  - `mask_lidar`: shape `(200,200,16)`, dtype uint8, binary — LiDAR visibility mask,
+    not previously accounted for in configs; candidate input for `L_lidar` (Phase 6).
+  - `mask_camera`: shape `(200,200,16)`, dtype uint8, binary — camera visibility mask,
+    matches `configs/dataset_mini_occ3d.yaml`'s `use_camera_visibility_mask` flag.
+- **Observations:** Occ3D-nuScenes ships semantics + two SEPARATE binary masks in one
+  `labels.npz`, not a combined mask or an embedded special value. `src/datasets/occ3d_gt.py`
   (Phase 1) needs to load and return all three arrays, not just semantics.
-- Decision / next step: Phase 0 fully complete (all 5 exit checklist items closed).
+- **Decision / next step:** Phase 0 fully complete (all 5 exit checklist items closed).
   Proceeding to Phase 1 (frame index & data loading).
 
+---
 
-  ## [Phase 1] Run ID: 2026-07-14-frame-index-and-gt-loader
+## [Phase 1] Run ID: 2026-07-14-frame-index-and-gt-loader
 
-- Git commit: (fill in after commit)
-- Config file(s): configs/dataset_mini_occ3d.yaml
-- Command: scripts/build_frame_index.py, scripts/spot_check_dataloader.py
-- Hardware: N/A (CPU-only, dataset indexing)
-- Hypothesis / what this run tests:
-  Build a reliable has_gt-tagged frame index across all 10 scenes before any
+- **Git commit:** `3b629b4` (tag: `v0.1-phase1-data-index`)
+- **Config file(s):** `configs/dataset_mini_occ3d.yaml`
+- **Command:** `scripts/build_frame_index.py`, `scripts/spot_check_dataloader.py`
+- **Hardware:** N/A (CPU-only, dataset indexing)
+- **Hypothesis / what this run tests:**
+  Build a reliable `has_gt`-tagged frame index across all 10 scenes before any
   model touches the data (Phase 1, roadmap steps 1-4).
-- Results:
+- **Results:**
 
   | scene | #frames | #has_gt (first pass) | #has_gt (after fix) | max_run (after fix) |
   |---|---|---|---|---|
@@ -121,152 +135,167 @@ python unittest_DFA3D.py
   | scene-1094 | 40 | 40 | 40 | 40 |
   | scene-1100 | 40 | 0 | 40 | 40 |
 
-- Observations:
+- **Observations:**
   First pass showed a clean ALL-OR-NOTHING pattern: 6 scenes at 100% GT
   coverage, 4 scenes at exactly 0%. Root cause (confirmed by direct file
   check, not guessed): this Occ3D-nuScenes GT dump uses TWO different
   on-disk layouts depending on scene:
-    (a) data/occ3d_gts/<scene>/<token>/labels.npz   (subfolder + labels.npz)
-    (b) data/occ3d_gts/<scene>/<token>.npz           (flat file)
+    - (a) `data/occ3d_gts/<scene>/<token>/labels.npz` (subfolder + labels.npz)
+    - (b) `data/occ3d_gts/<scene>/<token>.npz` (flat file)
+
   scene-0061, 0103, 0757, 0796, 1077, 1094 use (a); scene-0553, 0655, 0916,
   1100 use (b). No correlation found with log location (boston-seaport vs
   singapore) or log file naming that would predict which convention a scene
-  uses -- likely an artifact of how this GT release was assembled/merged
+  uses — likely an artifact of how this GT release was assembled/merged
   from multiple download batches, not a semantic pattern to rely on.
-  Fixed by checking both path candidates in load_occ3d_labels() rather than
+  Fixed by checking both path candidates in `load_occ3d_labels()` rather than
   assuming one convention. After the fix: 100% GT coverage across all 10
   scenes (better than the old 3DGS-project "mini_train index 39 gap" would
-  have suggested -- that gap does not appear to apply to this exact set of
+  have suggested — that gap does not appear to apply to this exact set of
   10 scenes/this GT release, or was specific to a different data path).
-- Bugs / issues encountered & fixes: see Observations above.
-- Decision / next step:
+- **Bugs / issues encountered & fixes:** see Observations above.
+- **Decision / next step:**
   Phase 1 exit checklist fully satisfied (all 10 scenes have full-length
   contiguous valid-GT runs, well above the 3-frame minimum needed for
-  Stage 2's unroll window). experiments/phase1_frame_index.json is now the
-  source of truth for all later phases -- do not recompute this differently
-  elsewhere. Proceeding to Phase 2 (Stage A standalone reproduction).
+  Stage 2's unroll window). `experiments/phase1_frame_index.json` is now the
+  source of truth for all later phases — do not recompute this differently
+  elsewhere. Proceeding to Phase 2 (Stage A reproduction).
 
+---
 
-  ## [Phase 2] Run ID: 2026-07-16-depth-gt-generation
+## [Phase 2] Run ID: 2026-07-16-depth-gt-generation
 
-- Git commit: (fill in after commit)
-- Config file(s): N/A -- standalone preprocessing script
-- Command: scripts/generate_depth_gt.py
-- Hardware: RTX 3090 24GB (unused -- pure CPU/numpy), ~2424 files, all 10 scenes
-- Hypothesis / what this run tests:
-  Generate BEVDepth-style depth_gt/*.bin files from our own v1.0-mini LiDAR sweeps,
+- **Git commit:** `40e3d77`
+- **Config file(s):** N/A — standalone preprocessing script
+- **Command:** `scripts/generate_depth_gt.py`
+- **Hardware:** RTX 3090 24GB (unused — pure CPU/numpy), ~2424 files, all 10 scenes
+- **Hypothesis / what this run tests:**
+  Generate BEVDepth-style `depth_gt/*.bin` files from our own v1.0-mini LiDAR sweeps,
   replacing GaussianFormer3D's SharePoint-downloaded depth_gt (not available for
-  our Occ3D-mini setup). Files written to data/nuscenes_mini/depth_gt/ (Option A:
-  onto the external drive, sibling of samples/, matching LoadMultiViewDepthFromFiles'
+  our Occ3D-mini setup). Files written to `data/nuscenes_mini/depth_gt/` (Option A:
+  onto the external drive, sibling of `samples/`, matching `LoadMultiViewDepthFromFiles`'
   expected layout unmodified).
-- Results:
-  2424 files written (10 scenes x ~40.4 avg frames x 6 cameras). Spot-checked 8 files
+- **Results:**
+  2424 files written (10 scenes × ~40.4 avg frames × 6 cameras). Spot-checked 8 files
   across multiple scenes/cameras: point counts 2100-4600 per file, u in [0,1600],
   v in [0,900], depth in [3-90]m. All physically plausible.
-- Bugs / issues encountered & fixes:
-  FIRST ATTEMPT WAS WRONG -- silently produced empty/garbage files (e.g. CAM_BACK_LEFT
+- **Bugs / issues encountered & fixes:**
+  FIRST ATTEMPT WAS WRONG — silently produced empty/garbage files (e.g. CAM_BACK_LEFT
   on scene-0061 frame 0 returned npts=0, u/v in range [-0.9,-0.4] instead of
-  [0,1600]/[0,900]). Root cause: built cam2img as the intrinsic matrix K directly
-  embedded in a 4x4, then used it as if it were the img2global multiplier -- but
-  GaussianFormer3D's own dataset/utils.py get_img2global() actually uses
-  img2cam = inv(cam2img) = K^-1 in that position (img2global = ego2global @ cam2ego
-  @ img2cam). Copying their variable NAME (cam2img) without verifying which matrix
-  role it actually plays in their formula produced numerically-plausible-looking
-  code that was nonetheless wrong. Fixed by matching their formula term-for-term,
-  confirmed via direct debug printout of u/v ranges before and after the fix.
-- Decision / next step:
-  depth_gt generation validated. Ready to move to Phase 2's config override
-  (pc_range/voxel_size/backbone swapped for Occ3D) and the first actual Stage A
-  "run on frame 0" step, now that occ4dgs_dataset.py + generate_depth_gt.py both
-  produce verified-correct inputs.
+  [0,1600]/[0,900]). Root cause: built `cam2img` as the intrinsic matrix K directly
+  embedded in a 4x4, then used it as if it were the `img2global` multiplier — but
+  GaussianFormer3D's own `dataset/utils.py get_img2global()` actually uses
+  `img2cam = inv(cam2img) = K^-1` in that position
+  (`img2global = ego2global @ cam2ego @ img2cam`). Copying their variable NAME
+  (`cam2img`) without verifying which matrix role it actually plays in their formula
+  produced numerically-plausible-looking code that was nonetheless wrong. Fixed by
+  matching their formula term-for-term, confirmed via direct debug printout of u/v
+  ranges before and after the fix.
+- **Decision / next step:**
+  `depth_gt` generation validated. Ready to move to Phase 2's config override and
+  the first actual Stage A "run on frame 0" step, now that `occ4dgs_dataset.py` +
+  `generate_depth_gt.py` both produce verified-correct inputs.
 
-  ## [Phase 2] Run ID: 2026-07-18-stage-a-first-successful-forward-pass
+---
 
-- Git commit: (fill in after commit)
-- Config file(s): GaussianFormer3D/config/occ4dgs_mini_occ3d_gs6400.py
-- Command: scripts/run_stage_a_frame0.py, scene-0061, frame 0
-- Hardware: RTX 3090 24GB, peak VRAM 2.84 GB (single sample, batch=1, no gradient/training yet)
-- Hypothesis / what this run tests:
-  Confirm GaussianFormer3D's BEVSegmentorLiDAR3D runs a full forward pass end-to-end
-  on our own Occ3D-mini dataset adapter, using N_g=6400, ResNet101-DCN, occ_annotation="occ3d".
-- Results: SUCCESS. Full forward pass completes. Output keys include pred_occ, gaussian,
-  sampled_xyz, sampled_label, occ_mask -- exactly the expected structure. Peak VRAM 2.84GB,
-  far under the 24GB budget (single sample, eval mode, no backward pass yet -- training will
-  cost substantially more due to activations/gradients, revisit VRAM budget once training loop exists).
-- Bugs / issues encountered & fixed (chronological, this phase):
-  1. results['lidar_path'] missing (separate key from pts_filename, both required)
-  2. results['sweeps'] missing -- ported obtain_sensor2top logic from make_gf3d_infos.py
-  3. LoadOccupancyOcc3d occ_path built with wrong root (missing occ3d_gts segment)
-  4. GaussianFormer3D custom module registry never triggered -- needed `import model`
-  5. _delete_=True is an mmengine config-merge directive, meaningless without _base_
-     inheritance -- removed from img_backbone, spconv_layer, head.empty_args/cuda_kwargs
-  6. img_neck was a partial override (start_level=1 only) relying on _base_/model.py's
-     FPN definition we don't inherit -- wrote the full FPN dict explicitly
-  7. use_deformable_func defaults False, causes UnboundLocalError deep in
-     deformable_module_3d.py -- set True explicitly
-  8. use_camera_embed defaults False -- set True to match proven SurroundOcc config intent
-  9. d_bound duplicate keyword argument (pasted twice in deformable_model dict) -- removed dup
-  10. image_wh, occ_xyz, occ_label, occ_cam_mask all missing from our hand-built metas dict
-      in run_stage_a_frame0.py's to_batch_of_one() -- added all four with correct dtypes
-      (occ_label as .long(), occ_cam_mask as .bool())
-  11. residual_mode defaults "add" (128-dim output), but FFN was sized for "cat" (256-dim
-      input) per the proven config's implied intent -- set residual_mode="cat" explicitly
-  Root cause common to most of these: writing occ4dgs_mini_occ3d_gs6400.py WITHOUT _base_
-  inheritance (deliberate choice to avoid silently importing unverified SurroundOcc/2D
-  defaults) means every field the original config relied on _base_ to supply had to be
-  identified and set explicitly, one crash at a time. In hindsight, a full field-by-field
-  diff against class __init__ signatures (as eventually done for DeformableFeatureAggregation3D)
-  earlier would have caught several of these at once rather than sequentially.
-- Decision / next step:
-  Phase 2 step 2 (run on one scene's frame 0) COMPLETE. Next: Phase 2 step 3 (visualize
-  Gaussian positions -- scatter plot, scale/opacity histograms; check for position
-  collapse, Z-axis collapse, scale saturation per roadmap exit checklist), then step 4
-  (repeat across all 10 scenes' frame 0, confirm no scene degenerates).
+## [Phase 2] Run ID: 2026-07-18-stage-a-first-successful-forward-pass
 
+- **Git commit:** `b91e990`
+- **Config file(s):** `GaussianFormer3D/config/occ4dgs_mini_occ3d_gs6400.py`
+  (mirrored into `configs/occ4dgs_mini_occ3d_gs6400.py`)
+- **Command:** `scripts/run_stage_a_frame0.py`, scene-0061, frame 0
+- **Hardware:** RTX 3090 24GB, peak VRAM **2.84 GB** (single sample, batch=1, no
+  gradient/training yet)
+- **Hypothesis / what this run tests:**
+  Confirm GaussianFormer3D's `BEVSegmentorLiDAR3D` runs a full forward pass end-to-end
+  on our own Occ3D-mini dataset adapter, using `N_g=6400`, ResNet101-DCN,
+  `occ_annotation="occ3d"`.
+- **Results:** SUCCESS. Full forward pass completes. Output keys include `pred_occ`,
+  `gaussian`, `sampled_xyz`, `sampled_label`, `occ_mask` — exactly the expected structure.
+  Peak VRAM 2.84GB, far under the 24GB budget (single sample, eval mode, no backward
+  pass yet — training costs substantially more due to activations/gradients; revisit
+  once the training loop exists — see next entry, which already answers this).
+- **Bugs / issues encountered & fixed (chronological, this phase):**
+  1. `results['lidar_path']` missing (separate key from `pts_filename`, both required).
+  2. `results['sweeps']` missing — ported `obtain_sensor2top` logic from `make_gf3d_infos.py`.
+  3. `LoadOccupancyOcc3d` occ_path built with wrong root (missing `occ3d_gts` segment).
+  4. GaussianFormer3D custom module registry never triggered — needed `import model`.
+  5. `_delete_=True` is an mmengine config-merge directive, meaningless without `_base_`
+     inheritance — removed from `img_backbone`, `spconv_layer`, `head.empty_args/cuda_kwargs`.
+  6. `img_neck` was a partial override (`start_level=1` only) relying on `_base_/model.py`'s
+     FPN definition we don't inherit — wrote the full FPN dict explicitly.
+  7. `use_deformable_func` defaults `False`, causes `UnboundLocalError` deep in
+     `deformable_module_3d.py` — set `True` explicitly.
+  8. `use_camera_embed` defaults `False` — set `True` to match proven SurroundOcc config intent.
+  9. `d_bound` duplicate keyword argument (pasted twice in `deformable_model` dict) — removed dup.
+  10. `image_wh`, `occ_xyz`, `occ_label`, `occ_cam_mask` all missing from our hand-built `metas`
+      dict in `run_stage_a_frame0.py`'s `to_batch_of_one()` — added all four with correct
+      dtypes (`occ_label` as `.long()`, `occ_cam_mask` as `.bool()`).
+  11. `residual_mode` defaults `"add"` (128-dim output), but FFN was sized for `"cat"` (256-dim
+      input) per the proven config's implied intent — set `residual_mode="cat"` explicitly.
+
+  **Root cause common to most of these:** writing `occ4dgs_mini_occ3d_gs6400.py` WITHOUT
+  `_base_` inheritance (deliberate choice to avoid silently importing unverified
+  SurroundOcc/2D defaults) means every field the original config relied on `_base_` to
+  supply had to be identified and set explicitly, one crash at a time. In hindsight, a
+  full field-by-field diff against class `__init__` signatures (as eventually done for
+  `DeformableFeatureAggregation3D`) earlier would have caught several of these at once
+  rather than sequentially.
+- **Decision / next step:**
+  Phase 2 step 2 (run on one scene's frame 0) COMPLETE. Next: visualize Gaussian
+  positions/scale/opacity across all 10 scenes, then validate the training path.
+
+---
 
 ## [Phase 2] Run ID: 2026-07-19-stage-a-training-path-validated
 
-- Git commit: (fill in after commit)
-- Config file(s): GaussianFormer3D/config/occ4dgs_mini_occ3d_gs6400.py
-- Command: scripts/overfit_stage_a_single_frame.py, scene-0061 frame 0, 200 iterations
-- Hardware: RTX 3090 24GB
-- Hypothesis / what this run tests:
+- **Git commit:** `605b893` (tag: `v0.2-phase2-stageA-reproduced`)
+- **Config file(s):** `GaussianFormer3D/config/occ4dgs_mini_occ3d_gs6400.py`
+- **Command:** `scripts/overfit_stage_a_single_frame.py`, scene-0061 frame 0, 200 iterations
+- **Hardware:** RTX 3090 24GB, peak VRAM **2.84 GB** (consistent with eval-mode run above —
+  overfitting a single cached frame doesn't add meaningfully to peak memory here)
+- **Hypothesis / what this run tests:**
   Confirm the full training path (loss computation, backward, gradient clipping,
   optimizer step) works end-to-end, and establish a reference mIoU number
-  (roadmap Phase 2 step 5, flagged "important").
-- Results:
-  Loss: 26.70 -> 21.62 over 200 iterations, consistent decrease, no divergence.
-  Reference single-frame overfit mIoU (classes 1-16): 0.1366 (11/16 classes present
+  (roadmap Phase 2 step 5, upgraded from "optional" to "important").
+- **Results:**
+  Loss: **26.70 → 21.62** over 200 iterations, consistent decrease, no divergence.
+  Reference single-frame overfit **mIoU: 0.1366** (classes 1-16; 11/16 classes present
   in this frame's GT). Modest, as expected for 200 iterations of light overfitting
-  on one frame with a from-scratch-initialized encoder -- the loss trend, not the
+  on one frame with a from-scratch-initialized encoder — the loss trend, not the
   absolute mIoU value, is the real pass/fail signal here.
-- Bugs / issues encountered & fixes:
-  1. Environment: ~/.local held a broken tensorflow 2.5.0 install (unrelated to this
+
+  Preceded by a full all-10-scenes collapse/saturation check (`scripts/visualize_gaussians.py`):
+  every scene's `G_0` came back clean — no position/Z-axis collapse, no scale saturation,
+  remarkably consistent statistics across scenes (means spanning the full `pc_range`,
+  scales within `[0.2, 1.6]`, opacity centered ~0.53 in every scene — expected, since
+  initialization dominates over data differences before training).
+- **Bugs / issues encountered & fixes:**
+  1. **Environment:** `~/.local` held a broken `tensorflow 2.5.0` install (unrelated to this
      project, leaking via Python's default user-site-packages behavior) that broke
      `loss/__init__.py`'s tensorboard import chain. Fixed per-invocation with
-     PYTHONNOUSERSITE=1, plus installing termcolor/urllib3/cachetools/absl-py/
-     google-auth/markdown directly into gf3d (previously silently borrowed from
-     ~/.local without our knowledge in every earlier Phase 0-2 script too --
-     requirements.txt needs a full audit/diff against `pip list` to catch what
-     else may be silently missing).
-  2. occ4dgs_mini_occ3d_gs6400.py was missing optimizer/grad_max_norm/max_epochs
-     top-level config (never needed until now, since only forward passes had
-     been run before) -- added, matching original SurroundOcc config's values.
-  3. model_obj(imgs=batch["imgs"], ...) reused the SAME tensor object every
-     iteration; BEVSegmentorLiDAR3D.extract_img_dpt_feat does an IN-PLACE
-     imgs.squeeze_(0) on the first call, permanently corrupting batch["imgs"]'s
-     shape for iteration 2 onward. Fixed by cloning imgs/dpt fresh each iteration
-     before passing to the model -- a bug specific to reusing one cached batch
-     across iterations in a toy script, would not occur in real training with a
-     fresh dataloader batch every step.
-  4. pred_occ is a LIST (one entry per applied-loss decoder layer), not a tensor
-     -- confirmed via source (gaussian_head.py: prediction.append(semantics)).
-     Fixed with isinstance checks, taking [-1] (final layer).
-  5. pred_occ shape is [B, 18_classes, 640000_voxels] -- class dim is dim=1, not
-     the last dim. argmax(dim=-1) was backwards; fixed to argmax(dim=1).
-- Decision / next step:
+     `PYTHONNOUSERSITE=1`, plus installing `termcolor`/`urllib3`/`cachetools`/`absl-py`/
+     `google-auth`/`markdown` directly into `gf3d` (previously silently borrowed from
+     `~/.local` without our knowledge in every earlier Phase 0-2 script too — now added
+     to `requirements.txt` explicitly).
+  2. `occ4dgs_mini_occ3d_gs6400.py` was missing `optimizer`/`grad_max_norm`/`max_epochs`
+     top-level config (never needed until now, since only forward passes had been run
+     before) — added, matching original SurroundOcc config's values.
+  3. `model_obj(imgs=batch["imgs"], ...)` reused the SAME tensor object every iteration;
+     `BEVSegmentorLiDAR3D.extract_img_dpt_feat` does an IN-PLACE `imgs.squeeze_(0)` on the
+     first call, permanently corrupting `batch["imgs"]`'s shape for iteration 2 onward.
+     Fixed by cloning `imgs`/`dpt` fresh each iteration before passing to the model — a
+     bug specific to reusing one cached batch across iterations in a toy script, would
+     not occur in real training with a fresh dataloader batch every step.
+  4. `pred_occ` is a LIST (one entry per applied-loss decoder layer), not a tensor —
+     confirmed via source (`gaussian_head.py: prediction.append(semantics)`). Fixed
+     with `isinstance` checks, taking `[-1]` (final layer).
+  5. `pred_occ` shape is `[B, 18_classes, 640000_voxels]` — class dim is `dim=1`, not
+     the last dim. `argmax(dim=-1)` was backwards; fixed to `argmax(dim=1)`.
+- **Decision / next step:**
   Phase 2 FULLY COMPLETE (all exit checklist items satisfied). Phase 3 (originally
-  "Stage C wiring smoke test") is subsumed by this result -- Gaussian-to-voxel
-  splatting is embedded inside BEVSegmentorLiDAR3D's head and already proven
-  working here. Proceeding directly to Phase 4 (Stage B skeleton: reference
-  buffer, motion hypernet, deform heads).
+  "Stage C wiring smoke test") is subsumed by this result — Gaussian-to-voxel
+  splatting is embedded inside `BEVSegmentorLiDAR3D`'s head and already proven
+  working here (see `IMPLEMENTATION_ROADMAP.md`'s Phase 3 section for the explicit
+  mapping of its exit checklist onto this evidence). Proceeding directly to Phase 4
+  (Stage B skeleton: reference buffer, motion hypernet, deform heads).

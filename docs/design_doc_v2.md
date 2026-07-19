@@ -6,6 +6,28 @@
 
 ---
 
+**Status update (post-Phase 2, `EXPERIMENT_LOG.md` 2026-07-19):** this document's Stage A
+description (§1) is now implemented and validated — see `IMPLEMENTATION_ROADMAP.md` Phase 2,
+`v0.2-phase2-stageA-reproduced`. Four things changed from what's written below, based on real
+numbers rather than assumption; flagged inline at each spot rather than silently rewritten:
+1. **§1.1 resolution:** kept at full 900×1600, not downscaled — Phase 2's 2.84GB peak VRAM
+   showed the downscale was never needed.
+2. **§1.3 `N_g`:** confirmed at **6,400** (not left as an open 6,400–12,800 range) — this is
+   now the working default, with 12,800 as a Phase 9 ablation candidate given the VRAM headroom.
+3. **§4 GT source:** `L_occ` is computed against **Occ3D-nuScenes GT**, not SurroundOcc GT as
+   originally drafted here — see `README.md`'s decision table and Phase 0/1 log entries for why.
+4. **§6 roadmap phase numbers** in this document (Phase 0–7) do **not** match
+   `IMPLEMENTATION_ROADMAP.md`'s actual phase numbers (Phase 0–10), which additionally include
+   environment setup and data-indexing phases before Stage A work begins. A mapping table is
+   added at the top of §6 below to avoid confusion between the two documents.
+
+Also worth noting: the actual implementation reuses GaussianFormer3D's `BEVSegmentorLiDAR3D`
+directly (config + dataset adapter) rather than porting the architecture described in §1 into
+new standalone modules. The *architecture* described below is accurate to what's running; the
+*implementation path* (reuse vs. reimplement) is documented in `README.md`'s "Architecture note".
+
+---
+
 ## 0. Confirmed decisions (locked in from this discussion)
 
 1. **Recursive, buffer-based pipeline.** GaussianFormer3D runs **once**, on frame 0 only, to
@@ -28,8 +50,9 @@ through every subsequent frame, it is worth implementing faithfully rather than 
 
 ### 1.1 Inputs
 - **Multi-view camera images** `I = {I_i}, i=1..N_c` (6 surround views for nuScenes),
-  resolution 900×1600 as in the original paper (can downscale for the 10-scene compute budget
-  — flag as a tunable if training time is tight).
+  resolution 900×1600 as in the original paper. *(Confirmed post-Phase 2: kept at full
+  resolution, no downscale needed — peak VRAM was only 2.84GB, far under the budget that
+  motivated considering a downscale here.)*
 - **LiDAR point cloud**, aggregated over the most recent `N_f` sweeps (paper uses 10) into a
   combined cloud `P̄ = {P_j}`, each point `(x,y,z,η)` with intensity `η`.
 
@@ -54,6 +77,9 @@ replacement if fewer) to initialize Gaussian **means** and **opacities**. `N_g =
 the original paper; for a 10-scene budget, **start smaller (e.g. 6,400–12,800)** — the
 paper's own ablation (Table IV, GaussianFormer-2 row) shows this only costs a few IoU points
 while cutting memory/compute roughly in half, which matters more here than chasing SOTA numbers.
+*(Confirmed post-Phase 2: `N_g=6,400` is the working default, validated clean across all 10
+scenes with no collapse/saturation. `12,800` remains a live ablation candidate for Phase 9,
+now cheaper to justify given the VRAM headroom Phase 2 revealed.)*
 
 Two Gaussian feature sets are maintained (as in the paper):
 - **Physical properties** `G = {G_i ∈ R^d}`, `d = 11 + |C|` — the actual learning target
@@ -200,7 +226,12 @@ on `G_t` from Stage B as it would on any static Gaussian set from Stage A.
 ```
 L = λ_occ · L_occ(Ô_t, O_t^gt)  +  λ_tv · L_tv(Δμ_t, Δμ_{t-1}, Δr_t, Δr_{t-1})  +  λ_lidar · L_lidar(G_t, P_t)
 ```
-- `L_occ`: CE + Lovász-softmax vs SurroundOcc GT, averaged over all unrolled frames.
+- `L_occ`: CE + Lovász-softmax vs GT, averaged over all unrolled frames. *(Corrected post-Phase
+  2: GT source is **Occ3D-nuScenes**, not SurroundOcc — see `README.md`'s decision table. The
+  loss function's `manual_class_weight` values are, as of Phase 2, still copied from
+  GaussianFormer3D's SurroundOcc config as a placeholder — flagged in
+  `configs/occ4dgs_mini_occ3d_gs6400.py` as not yet recomputed for Occ3D's actual class
+  distribution; revisit before treating results as final.)*
 - `L_tv`: penalizes **change in predicted motion** frame-to-frame (acceleration, not motion
   itself) — see v1 §3.2 for the exact form; unaffected by the recursion decision above.
 - `L_lidar`: nearest-Gaussian or depth-consistency term between `μ_t` and `P_t` — unaffected.
@@ -242,9 +273,29 @@ untrained new module — `HyperNet`, `Φ_μ`, `Φ_r` — alongside an already-pr
 
 ## 6. Updated implementation roadmap
 
-**Phase 0 — Stage A standalone.** Get GaussianFormer3D (§1) fully working and validated
-(reproduce paper's rough IoU/mIoU ballpark on a couple of scenes) before touching Stage B at
-all. Cache `G_0` per scene.
+**Phase-number mapping (this doc vs. `IMPLEMENTATION_ROADMAP.md`):** the phases below were
+drafted before the environment-setup and data-indexing work existed as separate tracked
+phases. The actual, executed roadmap in `IMPLEMENTATION_ROADMAP.md` is the authoritative one
+— use this table to translate between the two documents:
+
+| This doc | `IMPLEMENTATION_ROADMAP.md` | Status |
+|---|---|---|
+| *(none — added later)* | Phase 0: env/repo/data verification | ✅ complete |
+| *(none — added later)* | Phase 1: frame index & data loading | ✅ complete |
+| Phase 0: Stage A standalone | Phase 2: Stage A reproduction | ✅ complete (via reuse, not reimplementation — see status note at top of this doc) |
+| Phase 1: Stage C wiring smoke test | Phase 3: subsumed by Phase 2's result | ✅ complete (no separate execution needed) |
+| Phase 2: Stage B skeleton | Phase 4: Stage B skeleton | ⬜ next up |
+| Phase 3: real encoders + Stage 1 training | Phase 5: Stage 1 training | ⬜ pending |
+| Phase 4: loss completion | Phase 6: loss completion | ⬜ pending |
+| Phase 5: Stage 2 joint fine-tuning | Phase 7: Stage 2 joint fine-tuning | ⬜ pending |
+| Phase 6: evaluation & ablations | Phase 8 + 9: evaluation, ablations | ⬜ pending |
+| Phase 7: paper writing | Phase 10: paper writing | ⬜ pending |
+
+**Phase 0 — Stage A standalone.** ✅ **Complete** — see `IMPLEMENTATION_ROADMAP.md` Phase 2.
+Get GaussianFormer3D (§1) fully working and validated (reproduce paper's rough IoU/mIoU
+ballpark on a couple of scenes) before touching Stage B at all. Cache `G_0` per scene.
+*(Note: per-scene `G_0` caching wasn't needed yet, since Stage B doesn't exist to consume a
+cached value — revisit once Phase 4/5 make caching actually useful.)*
 
 **Phase 1 — Stage C wiring smoke test.** Feed a cached `G_0` directly into splatting (Stage C)
 with zero deformation, confirm occupancy loss and gradients behave — this reuses Phase 0's

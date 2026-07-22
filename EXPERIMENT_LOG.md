@@ -414,3 +414,49 @@ python unittest_DFA3D.py
 - **Decision / next step:** Phase 4 fully closed — skeleton validated (prior entry) AND all
   assumptions it rests on now confirmed against real source. Proceed to Phase 5 (real encoder
   wiring) with the pooling strategy above as the starting design, not an open question.
+
+  ---
+
+  ## [Phase 5] Run ID: 2026-07-23-real-wiring-validated
+
+- **Git commit:** (fill in after commit below)
+- **Config file(s):** configs/occ4dgs_mini_occ3d_gs6400.py (Stage A, frozen), no
+  stage_b_temporal.yaml training config exercised yet -- wiring only, no optimizer step
+- **Command:** `python tests/test_phase5_real_wiring.py`
+- **Hardware:** RTX 3090 24GB
+- **Hypothesis / what this run tests:** confirm the full Stage B chain -- real Stage A
+  G_0, real frame-1 encoder features (img_backbone/img_neck/pts_dpt_head, frozen),
+  PoolFeatures -> MotionHyperNet -> grid_query -> DeformHeadMu/R -> apply_update_rule ->
+  ReferenceBuffer -> GaussianHead splat -- runs end to end on one real 2-frame clip
+  (scene-0061), before writing any training loop.
+- **Results:** SUCCESS, all four checks passed with real evidence:
+  1. Real G_0 (actual Stage A forward pass, not synthetic) confirmed at N_g=6400.
+  2. G_1 provably distinct from G_0 on real data (not just Phase 4's toy sequence).
+  3. GaussianHead confirmed callable standalone on a Stage-B-deformed G_1 with real GT
+     metas -- pred_occ shape (1, 18, 640000) = (B, semantic_dim+1, H*W*D), matching
+     config exactly.
+  4. Peak VRAM at unroll_window=2, one scene, frozen encoders, no grad: 2.96 GB --
+     consistent with Phase 2's 2.84GB single-frame peak, confirms expected headroom
+     before scaling to 10 scenes / window=3 per roadmap Phase 5 step 4.
+- **Bugs / issues encountered & fixed:**
+  1. `DeformHeadMu` was originally unbounded (only the rotation head was tanh-bounded,
+     per design_doc_v2.md Sec 2.5's literal wording). An untrained head's raw delta
+     (~0.1-0.2m observed) pushed a Gaussian's z-coordinate to 5.4352, exceeding pc_range's
+     z-max of 5.4 (z's valid window is only 6.4m vs 80m for x/y, making it the most
+     vulnerable axis) -- crashed LocalAggregator's CUDA splat kernel's hard bounds
+     assertion. Root cause confirmed by checking each axis separately: the initial
+     combined min/max diagnostic across x,y,z was misleading, since x/y's much wider
+     range masked the z violation entirely. Fixed by tanh-bounding DeformHeadMu's output
+     per axis (max_disp_xyz=(4.0,4.0,1.0), reusing Stage A's own unit_xyz value as a
+     starting point -- flagged as revisit-worthy, not re-derived for Stage B's different
+     physical meaning), plus an optional pc_range clamp backstop in apply_update_rule
+     (defaults to None, so Phase 4's already-tagged toy-sequence test is unaffected --
+     confirmed by re-running test_stage_b_skeleton.py after the fix, all 3 items still pass).
+- **Decision / next step:** Phase 5's wiring/shape/VRAM validation is complete. Next:
+  write train_stage1.py -- the actual stage_1_warmup training loop (L_occ only, frozen
+  Stage A, unroll_window=2, 1-2 scenes first per roadmap step 4), including the
+  do-nothing-baseline (Delta_mu=0, Delta_r=identity) comparison the exit checklist
+  requires as first evidence the temporal module is learning anything.
+
+**Git tag:** (not yet -- tag once train_stage1.py exists and Phase 5's exit checklist
+items 2 and 3 are also closed, not just the wiring)

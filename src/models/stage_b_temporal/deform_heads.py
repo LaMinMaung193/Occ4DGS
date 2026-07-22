@@ -75,11 +75,33 @@ def axis_angle_to_quat(axis_angle: torch.Tensor) -> torch.Tensor:
 
 
 class DeformHeadMu(nn.Module):
-    """Phi_mu: predicts per-Gaussian position delta Delta_mu_t. Unbounded --
-    the position update is a world-scale delta in meters, no tanh cap
-    (only the rotation head bounds its output, per Sec 2.5)."""
+    """Phi_mu: predicts per-Gaussian position delta Delta_mu_t.
 
-    def __init__(self, in_dim: int, hidden_dim: int = 128):
+    FIXED (Phase 5 real-data wiring test, EXPERIMENT_LOG.md): originally left
+    unbounded on the theory that "only the rotation head bounds its output, per
+    Sec 2.5" -- this was wrong in practice. An untrained head's raw delta, even
+    tiny (~0.1-0.2m observed), can push a Gaussian already near the z boundary
+    (z's valid window is only 6.4m, vs 80m for x/y) outside pc_range, which
+    LocalAggregator's CUDA splat kernel enforces with a hard assertion (no
+    clipping/masking) -- confirmed by reproducing the crash and checking each
+    axis separately (combined min/max across x,y,z masked the z violation,
+    since x/y's much wider range dominated the printed extremes).
+
+    Fix: tanh-bound the raw output per axis, scaled by max_disp_xyz -- mirrors
+    Stage A's own SparseGaussian3DRefinementModule restrict_xyz/unit_xyz
+    pattern (same problem, same codebase, already-vetted mechanism) rather than
+    inventing a different safeguard. Default max_disp_xyz=[4.0, 4.0, 1.0]
+    reuses Stage A's own unit_xyz value from occ4dgs_mini_occ3d_gs6400.py verbatim
+    as a starting point -- NOT re-derived for Stage B's different physical
+    meaning (inter-frame motion over ~0.5s, vs. Stage A's iterative-refinement
+    step size), so treat this as an explicit, revisit-worthy assumption, not a
+    settled value. apply_update_rule additionally clamps to pc_range as a
+    defense-in-depth backstop, in case any single per-Gaussian delta plus an
+    already-near-boundary G_0 position still slips past this bound.
+    """
+
+    def __init__(self, in_dim: int, hidden_dim: int = 128,
+                 max_disp_xyz=(4.0, 4.0, 1.0)):
         super().__init__()
         self.net = nn.Sequential(
             nn.Linear(in_dim, hidden_dim),
@@ -88,9 +110,13 @@ class DeformHeadMu(nn.Module):
             nn.ReLU(inplace=True),
             nn.Linear(hidden_dim, 3),
         )
+        self.register_buffer(
+            "max_disp_xyz", torch.tensor(max_disp_xyz, dtype=torch.float32)
+        )
 
     def forward(self, z: torch.Tensor) -> torch.Tensor:
-        return self.net(z)  # (N, 3)
+        raw = self.net(z)  # (N, 3)
+        return torch.tanh(raw) * self.max_disp_xyz  # (N, 3), bounded per axis
 
 
 class DeformHeadR(nn.Module):
@@ -126,12 +152,26 @@ def apply_update_rule(
     prev_state: GaussianState,
     delta_mu: torch.Tensor,
     delta_quat: torch.Tensor,
+    pc_range=None,
 ) -> GaussianState:
     """design_doc_v2.md Sec 2.6's update rule. prev_state is read from the
     buffer (G_{t-1}); returns the new G_t. Does not itself write to the
     buffer -- callers do that explicitly (buffer.write(G_t)) so the
-    read -> deform -> write steps stay visible and separately testable."""
+    read -> deform -> write steps stay visible and separately testable.
+
+    pc_range (optional, [xmin,ymin,zmin,xmax,ymax,zmax]): if given, clamps
+    new_means into this range as a defense-in-depth backstop, in case
+    DeformHeadMu's own tanh bound plus an already-near-boundary prev_state
+    position still pushes a Gaussian outside GaussianHead's splat kernel's
+    valid volume (confirmed necessary in practice -- see DeformHeadMu's
+    docstring for the real crash this guards against). Defaults to None
+    (no clamp) so Phase 4's toy-sequence test, which uses synthetic
+    coordinates with no relation to Occ3D's real pc_range, is unaffected."""
     new_means = prev_state.means + delta_mu
+    if pc_range is not None:
+        lo = new_means.new_tensor(pc_range[:3])
+        hi = new_means.new_tensor(pc_range[3:])
+        new_means = torch.clamp(new_means, min=lo, max=hi)
     new_rotations = quat_normalize(quat_multiply(delta_quat, prev_state.rotations))
     return GaussianState(
         means=new_means,

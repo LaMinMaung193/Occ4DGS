@@ -299,3 +299,47 @@ python unittest_DFA3D.py
   working here (see `IMPLEMENTATION_ROADMAP.md`'s Phase 3 section for the explicit
   mapping of its exit checklist onto this evidence). Proceeding directly to Phase 4
   (Stage B skeleton: reference buffer, motion hypernet, deform heads).
+
+---
+
+  ## [Phase 4] Run ID: 2026-07-22-stageB-skeleton-validated
+
+- **Git commit:** (fill in after commit below)
+- **Config file(s):** `configs/stage_b_temporal.yaml` (structure only, dummy inputs, no training)
+- **Command:** `python tests/test_stage_b_skeleton.py`
+- **Hardware:** RTX 3090 24GB (test suite is CPU/GPU-agnostic, tiny toy scale — N=64 Gaussians)
+- **Hypothesis / what this run tests:**
+  Validate Stage B's recursive buffer mechanics and tensor shapes with dummy encoders
+  (random noise standing in for F^3D_t, per roadmap Phase 4 step 2), before wiring in
+  real camera/LiDAR features in Phase 5.
+- **Results:** SUCCESS, all three exit-checklist items confirmed with evidence, not eyeballed:
+  1. Quaternion composition (`Δr_t ⊗ r_{t-1}`, normalized) verified against a hand-computed
+     90°+90°=180° z-rotation example, plus identity-composition and zero-rotation edge cases.
+  2. `grid_sample` coordinate convention (x,y,z ↔ W,H,D axis order) verified against a
+     hand-indexed 2×2×2 grid with a distinct value per corner — catches an img2cam-style
+     axis-order bug class before real features make it silent.
+  3. Buffer state after `write(g1)` provably holds `G_1` (`not torch.allclose` vs `G_0`'s
+     means), and after `write(g2)` provably holds `G_2` (not `G_1`, not `G_0`) — recursion
+     confirmed actually recursive, not silently re-reading `G_0`.
+  All tensor shapes match across the full chain for the 2-frame toy sequence (`N=64`,
+  `L=3` grid levels at resolutions `(4,8,16)`, `grid_feat_dim=16`).
+- **Bugs / issues encountered & fixed:**
+  1. Manual incremental `__init__.py` edit (`echo "from .buffer import GaussianState" > __init__.py`)
+     silently overwrote the full package `__init__.py` down to one import — caused
+     `ImportError: cannot import name 'ReferenceBuffer'` in both the direct import check and
+     `test_stage_b_skeleton.py`. Root cause: `echo >` truncates rather than appends. Fixed by
+     writing the complete `__init__.py` in one step instead of building it up incrementally
+     with shell redirection.
+- **Decision / next step:**
+  Phase 4 FULLY COMPLETE (all exit checklist items satisfied with logged evidence).
+  Two open items flagged for resolution before Phase 5 makes them load-bearing (not
+  blocking Phase 4's own completion):
+  1. `grid_query.py`'s resolution of design_doc_v2.md §2.4's ambiguous notation (positional
+     encoding as grid coordinate, dimensionally impossible) — implemented as: grid_sample at
+     the Gaussian's own normalized mean position, positional encoding concatenated as extra
+     context. Reasonable, standard pattern (K-Planes/Instant-NGP/4DGC), but unconfirmed
+     against 4DGC's actual source — needs closing before Phase 5.
+  2. `configs/stage_b_temporal.yaml`'s `motion_hypernet.grid_resolution: null` should be set
+     to `[4, 8, 16]` now that Phase 4 has validated these shapes, rather than left open.
+
+**Git tag:** `v0.4-phase4-stageB-skeleton`

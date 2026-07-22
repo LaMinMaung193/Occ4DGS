@@ -343,3 +343,74 @@ python unittest_DFA3D.py
      to `[4, 8, 16]` now that Phase 4 has validated these shapes, rather than left open.
 
 **Git tag:** `v0.4-phase4-stageB-skeleton`
+
+---
+
+## [Phase 4→5 bridge] Source-verification investigation: 2026-07-22
+
+- **Git commit:** N/A (no code changed — source-reading investigation only, against
+  GaussianFormer3D at ~/Documents/min/GaussianFormer3D)
+- **Config file(s):** N/A
+- **Command:** N/A — manual `find`/`cat`/`grep` against GaussianFormer3D source:
+  `model/head/gaussian_head.py`, `model/utils/utils.py` (`get_rotation_matrix`),
+  `model/encoder/gaussian_encoder/refine_module.py`, `model/encoder/gaussian_encoder/deformable_module_3d.py`
+- **Hardware:** N/A
+- **Hypothesis / what this investigation tests:**
+  Close three open assumptions flagged after Phase 4's skeleton validation, all load-bearing
+  for Phase 5's real-encoder wiring: (1) does `GaussianState`'s field-name/shape assumption
+  match Stage A's actual `gaussian` dict output; (2) is Stage B's assumed scalar-first
+  `(w,x,y,z)` quaternion convention correct; (3) can `GaussianHead` be called standalone per
+  frame for splat+loss, or does Stage B need to re-run the full encoder/decoder each step;
+  (4) what is `F^3D_t` concretely, for Stage B's motion-hypernet pooling design (§2.3).
+- **Results:** All four confirmed with source evidence, no guesses left standing:
+  1. **Field names/shapes confirmed exact match.** `GaussianHead.prepare_gaussian_args`
+     confirms `gaussians.means/.scales/.rotations/.opacities/.semantics` — identical to
+     `GaussianState`'s fields. `semantics` is `num_classes-1`=17-dim, matching
+     `semantic_dim=17` in the working config. No renaming needed anywhere in Phase 4's code.
+  2. **Quaternion convention confirmed: scalar-first (w,x,y,z), unit-normalized before use.**
+     `get_rotation_matrix`'s `mat1` construction matches the standard left
+     quaternion-multiplication matrix `L(q)` term-for-term for `q=(w,x,y,z)`. Identity buffer
+     `torch.tensor([1.,0.,0.,0.])` in `GaussianHead.__init__` is consistent with this.
+     `refine_module.py`'s `forward()` does `F.normalize(output[...,6:10], dim=-1)` before
+     building the output `GaussianPrediction` — rotation arrives pre-normalized. Phase 4's
+     `deform_heads.py` assumption was exactly right; no changes needed.
+     — Side note (not urgent, no action needed now): `refine_module.py` has a second,
+     apparently-dead method `get_gaussian()` that returns the *raw unnormalized* rotation
+     instead of `rot` — not used in the active `forward()` path, flag only if a future bug
+     ever traces back to that method being called directly.
+  3. **`GaussianHead` confirmed callable standalone per frame.** `forward()` takes only
+     `representation` (`[{'gaussian': G}, ...]`) and GT `metas`
+     (`occ_xyz`/`occ_label`/`occ_cam_mask`) — it never touches `img_backbone`/`img_neck`/the
+     iterative deformable-attention decoder stack. It calls `self.aggregator` (CUDA splat op)
+     directly on the five Gaussian-property tensors plus GT sample points. **Stage B's
+     per-frame training step is therefore: (a) run only `img_backbone`+`img_neck`+
+     `lidar_voxel_encoder` to get frame t's features (skipping GaussianFormer3D's 4-block
+     decoder entirely), (b) predict `M_t`/`G_t` via HyperNet+deform heads, (c) call
+     `GaussianHead` directly with `[{'gaussian': G_t}]` for splat+loss.** Materially cheaper
+     per-frame cost than assumed — a real, tractable architecture, not a design gap.
+  4. **`F^3D = F^d ⊗ F^c` is never materialized as a literal tensor.**
+     `DeformableFeatureAggregation3D.forward()` takes two separate multi-scale lists,
+     `feature_maps` (camera, from `img_neck`'s FPN) and `dpt_feature_maps` (LiDAR depth-score
+     maps, from `pts_dpt_head`), each `(B, num_cam, C=128, H_l, W_l)` across 4 levels — the
+     "outer product" in design_doc_v2.md §1.5 describes what the CUDA deformable-sampling op
+     achieves functionally, not a dense tensor ever constructed in Python. This resolves the
+     open pooling-strategy question for Stage B's `MotionHyperNet` input with a known,
+     concrete shape rather than a conceptual placeholder.
+- **Decisions closed as a result:**
+  - Motion-hypernet pooling (§2.3, Phase 5 design): global-average-pool each of
+    `feature_maps`'/`dpt_feature_maps`'s 4 levels over `(num_cam, H_l, W_l)` → concat → one
+    `nn.Linear` down to `in_dim`. Chosen over a spatial 3D-CNN alternative given QGFusion's
+    already-observed overfitting failure mode on this same 10-scene budget (900-query run,
+    train~7-8% vs val~3.92% mIoU, fixed global embeddings learning scene-specific shortcuts).
+    Spatial-CNN variant deferred to a later ablation, not built blind.
+  - `configs/stage_a_gaussianformer3d.yaml` and `stage_a_gaussianformer3d/__init__.py`
+    (stale pre-pivot scaffolding, still describing the superseded ResNet50/half-resolution
+    plan): annotate with a `SUPERSEDED — see occ4dgs_mini_occ3d_gs6400.py` header rather than
+    delete, consistent with the project's existing pattern of logging pivots explicitly
+    (README's decision table) instead of erasing the trail.
+  - `configs/stage_b_temporal.yaml`'s `motion_hypernet.grid_resolution`: set to `[4, 8, 16]`
+    (Phase 4 validated exactly these shapes) rather than left `null`.
+- **Bugs / issues encountered & fixed:** None (read-only investigation).
+- **Decision / next step:** Phase 4 fully closed — skeleton validated (prior entry) AND all
+  assumptions it rests on now confirmed against real source. Proceed to Phase 5 (real encoder
+  wiring) with the pooling strategy above as the starting design, not an open question.

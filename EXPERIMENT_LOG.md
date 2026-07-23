@@ -460,3 +460,77 @@ python unittest_DFA3D.py
 
 **Git tag:** (not yet -- tag once train_stage1.py exists and Phase 5's exit checklist
 items 2 and 3 are also closed, not just the wiring)
+
+---
+
+## [Phase 5] Run ID: 2026-07-23/24-stageA-real-training-and-heldout-generalization-check
+
+- **Git commit:** (fill in after commit below)
+- **Config file(s):** occ4dgs_mini_occ3d_gs6400.py (Stage A architecture, unmodified);
+  script-level overrides only (N_EPOCHS_OVERRIDE=60 in train_stage_a.py, not a config
+  edit -- see that file's own comment for why)
+- **Commands:**
+  `PYTORCH_CUDA_ALLOC_CONF=max_split_size_mb:128 PYTHONNOUSERSITE=1 python scripts/train_stage_a.py`
+  `PYTHONNOUSERSITE=1 python scripts/train_stage1.py`
+  `PYTHONNOUSERSITE=1 python scripts/evaluate_heldout_scene.py`
+- **Hardware:** RTX 3090 24GB (shared with labmate's concurrent QGFusion job, ~6.4GB)
+- **Hypothesis:** Root-cause investigation into why the Phase 5 do-nothing-vs-trained
+  comparison showed ~0% IoU on both branches, including static classes needing no motion
+  compensation. Confirmed cause: Stage A was never actually trained in any prior run
+  (Phase 2, Phase 5 wiring test, and the first train_stage1.py run all used a fresh
+  `init_weights()` model -- only img_backbone had real pretrained weights; lifter/
+  encoder/head started random every time). This run trains Stage A for real, then
+  re-tests Stage B's do-nothing-vs-trained comparison, then tests whether any
+  improvement generalizes to a held-out scene.
+- **Results:**
+  1. **Stage A trained for real, 24 then 60 epochs, scene-0061 only.** Loss decreased
+     monotonically both runs (24-epoch: 23.62->22.20; 60-epoch: 23.57->20.88), confirming
+     24 epochs had stopped short of convergence -- 60-epoch checkpoint used going forward.
+  2. **In-sample Stage B comparison (scene-0061, same clips trained on), against the
+     60-epoch Stage A checkpoint:** Trained mIoU=16.35/iou2=29.01 vs Do-nothing
+     mIoU=14.90/iou2=23.88 (Delta +1.45/+5.13). Every non-degenerate class favored
+     trained, including a previously-all-zero moving-object class (truck) becoming
+     non-trivial (24.12% vs prior run's 0.00%). This is a real, large improvement over
+     the untrained-G_0 result (which showed Delta +0.147/+0.454) -- confirms the root
+     cause diagnosis was correct and the fix mattered.
+  3. **Held-out scene test (scene-0103, never used to train Stage A or Stage B):**
+     Trained mIoU=27.47/iou2=17.87 vs Do-nothing mIoU=27.48/iou2=18.00 (Delta
+     -0.014/-0.134). Per-class breakdown on non-degenerate classes is MIXED, not
+     consistently favoring trained (driveable_surface -0.46, sidewalk -0.38,
+     manmade -1.67 favor do-nothing; truck +0.23, vegetation +2.08 favor trained) --
+     opposite pattern from the in-sample result's universal positive direction.
+     **Conclusion: the in-sample improvement did not generalize.** Most likely
+     explanation: Stage B's temporal module learned scene-0061-specific patterns
+     rather than a transferable motion-prediction capability, exactly the failure mode
+     a held-out test exists to catch.
+- **Artifacts/confounds identified, both real, neither yet resolved:**
+  1. **MeanIoU 0-support-class artifact:** classes with zero GT voxels in the evaluation
+     window default to 100% IoU (confirmed: barrier/bus/construction_vehicle on
+     scene-0103, trailer on scene-0061 throughout). Inflates raw mIoU averages by
+     ~25 points on scene-0103 specifically (4 degenerate classes vs. scene-0061's 1),
+     making raw mIoU NOT directly comparable across scenes without excluding these --
+     this is why held-out mIoU (27.47) superficially looked HIGHER than in-sample
+     (16.35) despite the real per-class signal being worse.
+  2. **Confounded unknown:** Stage A itself was also only ever trained on scene-0061,
+     so G_0 on scene-0103 is out-of-distribution for Stage A too, not just Stage B.
+     Cannot currently separate "Stage B's motion prediction doesn't generalize" from
+     "G_0 itself is already degraded on an unseen scene, giving Stage B a compromised
+     starting point regardless of its own generalization."
+- **Bugs fixed en route:** (1) DeformHeadMu z-boundary crash (see prior entry);
+  (2) evaluation code passed raw logits without argmax and wrong batch/layer indexing
+  to MeanIoU._after_step, fixed against train.py's real usage pattern; (3) wandb.log
+  crash inside MeanIoU._after_epoch (no active run) -- fixed via wandb.init(mode="disabled"),
+  confirmed this does not touch or require any account/login; (4) CUDA OOM training
+  Stage A's full backward pass while sharing the GPU with a concurrent labmate job --
+  fixed via PYTORCH_CUDA_ALLOC_CONF=max_split_size_mb:128 (Option 1 sufficed; AMP
+  fallback written but not needed).
+- **Decision / next step:** Exit checklist item 2 is NOT genuinely satisfied yet -- the
+  positive in-sample result does not survive a held-out test. Both Stage A and Stage B
+  currently exist only as single-scene fits. The real next step is scope (train both
+  across more scenes) before any further architecture changes, since nothing here
+  indicates the wiring itself is wrong -- only that a 1-scene training budget is too
+  narrow to produce a generalizing result, which is itself a useful, expected finding
+  at this stage of the roadmap's "1-2 scenes, then scale" discipline.
+
+**Git tag:** not yet -- exit checklist item 2 unresolved, item 3 (10-scene scaling)
+not yet attempted.

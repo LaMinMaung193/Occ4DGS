@@ -66,7 +66,17 @@ import json  # noqa: E402
 
 
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-SCENES = ["scene-0061"]  # Decision 1: 1-2 scenes first, confirm convergence
+SCENES = ["scene-0061", "scene-0103", "scene-0553", "scene-0655", "scene-0757",
+          "scene-0796", "scene-0916", "scene-1077"]
+# scaled 6->8 scenes; neutral selection (next two in ALL_SCENES' existing order).
+# scene-1094 and scene-1100 are now a PERMANENT held-out validation pair -- deliberately
+# never added to SCENES going forward, per the 8:2 split decision (EXPERIMENT_LOG.md):
+# gap ratio (trained/unseen adjusted mIoU) plateaued around 2.4-2.6x across 1/3/6-scene
+# runs despite tripling scene count twice, so further Stage-A-only scaling has
+# diminishing returns -- this is the last scaling step before pivoting to re-testing
+# Stage B's actual hypothesis against a fixed, never-trained-on validation pair.
+# N_EPOCHS_OVERRIDE kept at 120 (unchanged) -- established that epoch count controls
+# per-scene convergence depth, not scene diversity; already tuned separately.
 GRAD_ACCUMULATION = 1     # no accumulation needed at this VRAM budget (Phase 2: 2.84GB peak)
 WARMUP_FRACTION = 0.05    # scaled warmup, see module docstring
 CHECKPOINT_DIR = os.path.join(REPO_ROOT, "experiments", "stage_a_checkpoints")
@@ -79,7 +89,7 @@ CHECKPOINT_DIR = os.path.join(REPO_ROOT, "experiments", "stage_a_checkpoints")
 # epochs (matching the project's other established epoch-count convention, e.g.
 # stage_b_temporal.yaml's stage_1_warmup) to see if it actually converges rather than
 # stopping while still improving.
-N_EPOCHS_OVERRIDE = 60
+N_EPOCHS_OVERRIDE = 120  # doubled to test whether scene-0061 recovers its 1-scene quality (was 12.519 adjusted mIoU, dropped to 8.686 at 3 scenes/60 epochs) while unseen-scene gap keeps narrowing -- isolates training-length as the only changed variable vs. the last run
 
 
 def to_cuda(batch):

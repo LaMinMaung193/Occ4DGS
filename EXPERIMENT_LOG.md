@@ -534,3 +534,190 @@ items 2 and 3 are also closed, not just the wiring)
 
 **Git tag:** not yet -- exit checklist item 2 unresolved, item 3 (10-scene scaling)
 not yet attempted.
+
+---
+
+## [Phase 5] Run ID: 2026-07-24-stageA-cross-scene-confound-confirmed
+
+- **Command:** `PYTHONNOUSERSITE=1 python scripts/evaluate_stage_a_all_scenes.py`
+- **Hypothesis:** Decision 1 (isolate before scaling) -- is G_0 itself degraded on scenes
+  Stage A never trained on, confounding the scene-0103 held-out Stage B result?
+- **Results:** CONFIRMED. Adjusted mIoU (excludes zero-GT-support classes, which
+  raw mIoU silently includes as misleading 100%): scene-0061 (trained)=12.52;
+  9 unseen scenes range 3.42-6.48, mean~5.16 -- a consistent ~2.4x drop across every
+  single unseen scene, not scattered noise. Raw mIoU is actively backwards (appears to
+  INCREASE on unseen scenes, up to 41.5) purely because unseen scenes have 4-6
+  zero-support classes vs. scene-0061's 1, inflating the naive average.
+- **Conclusion:** The scene-0103 held-out Stage B test (prior entry) was confounded as
+  suspected -- Stage B's motion prediction was tested on top of an already-~2.4x-degraded
+  G_0, not a fair single-variable generalization test. Cannot yet conclude whether Stage
+  B's own architecture generalizes until Stage A itself covers enough scenes that G_0
+  is reasonably reliable on a genuinely held-out scene.
+- **Secondary finding:** even in-sample (scene-0061), rare/movable classes (car, bicycle,
+  motorcycle, pedestrian) score genuine 0.00% (real GT support, zero correct) -- Stage A's
+  current signal is concentrated in large static classes regardless of scene familiarity.
+- **Decision / next step:** Scale Stage A's training to 3-4 scenes (neutral selection --
+  next scenes in ALL_SCENES' existing order, not cherry-picked from this diagnostic, per
+  the experimenter-bias discipline already agreed) before re-attempting any held-out
+  Stage B generalization test.
+
+  ---
+
+  ## [Phase 5] Run ID: 2026-07-25-stageA-3scene-diagnostic (labeling bug noted)
+
+- Bug: evaluate_stage_a_all_scenes.py's TRAINED_ON constant was not updated when
+  train_stage_a.py's SCENES scaled 1->3; scene-0103/scene-0553 were mislabeled
+  "(unseen)" despite being trained on. Corrected post-hoc for this analysis; script
+  itself will be fixed before next run.
+- Corrected trained-group mean adjusted mIoU: 10.17 (scene-0061=8.686, scene-0103=10.369,
+  scene-0553=11.454). Unseen-group (7 scenes) mean: 5.71.
+- Gap ratio trained/unseen: 1.78x, improved from the 1-scene run's 2.4x -- more
+  training scenes narrows the generalization gap, as expected.
+- Regression: scene-0061 itself dropped 12.519->8.686 vs. the 1-scene checkpoint;
+  other_flat and truck classes lost all signal (20.28%->0%, 29.39%->0%). Likely
+  undertrained relative to 3x the data at the same 60-epoch budget (loss still
+  decreasing at epoch 59), not evidence scaling scenes is harmful -- not yet confirmed.
+- Decision: before further scaling, fix the TRAINED_ON labeling bug, then decide
+  whether to increase epochs at 3 scenes to test the undertraining hypothesis, or
+  proceed to more scenes anyway.
+
+  ---
+
+  ## [Phase 5] Run ID: 2026-07-27-stageB-8scene-matched-heldout
+
+- Stage B retrained on the same 8 scenes as Stage A (previously Stage B only ever
+  trained on scene-0061, a scope mismatch now fixed), 20 epochs, loss converged
+  (11.08->10.72, plateaued ~epoch 10).
+- In-sample (8 scenes, 316 clips): every real class favors trained over do-nothing,
+  no exceptions (car +3.45, vegetation +5.96, truck +1.51, manmade +1.48, others
+  smaller positive). Clean, consistent positive result.
+- Held-out (scene-1094, scene-1100, never trained on by Stage A or B), adjusted for
+  zero-support-class artifact: scene-1094 trained=3.358 vs do-nothing=3.506 (-0.148);
+  scene-1100 trained=4.838 vs do-nothing=7.517 (-2.679, manmade/vegetation
+  particularly collapsed).
+- CONCLUSION: consistent positive in-sample + consistent negative held-out =
+  overfitting, not undertraining (undertraining would show weak results on both).
+  This is now a clear, matched-scope answer: Stage B's current motion-prediction
+  design does not generalize at this project's data scale.
+- Decision: this is a real research finding to report, not a bug to keep chasing.
+  Possible next directions (not yet pursued): stronger regularization on deform
+  heads, smaller HyperNet capacity, or accepting this as evidence that 10 scenes is
+  simply insufficient for a generalizing temporal module and reporting it as such.
+
+  ---
+
+  ## [Phase 5] Run ID: 2026-07-29-gt-motion-measurement-and-ego-compensation-saga
+
+### Part 1 — Ground-truth motion magnitude measurement (Tier 1 item 3)
+
+- **Command:** `scripts/measure_gt_motion.py`, across all 10 mini-set scenes.
+- **Hypothesis:** does the held-out generalization ceiling (established over the prior
+  8-scene sweep) reflect a lack of real learnable motion signal in the data, or something
+  else?
+- **Result:** Overwhelming, unambiguous signal -- 60-84% of non-empty voxels change label
+  between adjacent frames across scenes (overall mean 63.9%). Critically, STATIC classes
+  (driveable_surface, manmade, vegetation, etc.) show nearly as much change (60.4%) as
+  DYNAMIC classes (80.6%) -- roads and buildings don't move, so this apparent "change" is
+  overwhelmingly ego-vehicle motion, not independent object motion. `occ_label` is
+  ego-centric per frame (confirmed via `use_ego=True` in the pipeline), so comparing the
+  same voxel index across two frames compares two different real-world patches whenever
+  the ego vehicle has moved -- and at nuScenes' ~2Hz keyframe rate, it always has.
+- **Conclusion:** No shortage of raw signal -- the opposite problem. The temporal module
+  was being asked to rediscover, from a small MLP on pooled visual features and 8 scenes
+  of data, a global rigid transform (ego motion) that the dataset's own pose fields
+  (`ego2global`/`lidar2global`) already encode exactly. This reframes every prior
+  regularization/architecture experiment this session (Step 1 regularization, PE removal,
+  scene-count scaling) as attempts to help a small model learn something it should never
+  have had to learn from scratch.
+- **Decision:** implement explicit ego-motion compensation -- apply the KNOWN rigid
+  transform directly, let the learned Delta_mu/Delta_r handle only the residual
+  (independent object motion). Highest-leverage change identified all session.
+
+### Part 2 — Stage B scene-scaling sweep: a real confound found and fixed
+
+- Ran train_stage1.py at scene counts 1/3/6/8 (holding the 8-scene Stage A checkpoint and
+  a fixed seed constant), checking held-out delta at fixed EPOCH boundaries.
+- **Confound discovered:** clip count differs 8x across these runs (38 vs 316
+  clips/epoch), so "epoch 1" represents ~8x more optimizer steps for n=8 than n=1. The
+  apparent "more scenes -> worse held-out delta" trend was confounded with "more
+  optimizer steps -> worse held-out delta" -- a pattern already visible in every prior
+  experiment this session, regardless of architecture changes.
+- **Fix:** rewrote train_stage1.py's evaluation trigger to gate on OPTIMIZER STEP COUNT
+  (`EVAL_EVERY_OPT_STEPS`), not epoch index, so runs at different scene counts are
+  comparable on the same x-axis. Also added: fixed seed (`SEED=42`), CLI scene-count
+  argument (`python train_stage1.py N`), best-held-out-delta checkpointing (separate from
+  final-epoch checkpoint).
+- This sweep was superseded by the ego-motion compensation work below before being
+  re-run to completion under the corrected step-matched methodology -- worth re-running
+  once ego-compensation's role is settled.
+
+### Part 3 — Ego-motion compensation: implementation, a real bug found and fixed, and a genuine (non-bug) limitation discovered
+
+**Implementation** (new/modified):
+- `src/datasets/occ4dgs_dataset.py`: now passes `ego2global`/`lidar2global` through
+  (previously computed internally by `get_data_info` but discarded).
+- `scripts/run_stage_a_frame0.py`: `to_batch_of_one` now carries these poses into the
+  CUDA-ready `metas` dict (purely additive, confirmed backward-compatible).
+- `src/models/stage_b_temporal/deform_heads.py`: added `rotmat_to_quat` (hand-verified
+  against identity and a 5-degree yaw case, plus round-trip reconstruction),
+  `compute_relative_transform` (hand-verified via a synthetic 5m-forward + 3-degree-yaw
+  ego motion test -- a static world point correctly re-expressed between frames), and
+  `apply_ego_compensated_update_rule` (applies the known transform, then the learned
+  residual via the existing `apply_update_rule`).
+- `train_stage1.py`'s `deform_one_step` wired to use `lidar2global` (not `ego2global`) --
+  chosen per `occ_annotation="occ3d"`'s confirmed LiDAR-centric convention.
+- `scripts/check_ego_compensation.py` (new): isolates the compensation's correctness
+  independent of any learning, via a "zero learned residual" mode.
+
+**Bug found and fixed:** First real-data test (n=1 scene) showed the ego-compensated
+`trained` branch regressing well below the pre-compensation baseline from the very first
+checkpoint -- suspicious, since near-init the learned residual is ~0, so `trained` should
+reduce to roughly ego-compensated-`G_0`-unmodified, which should be at least as good as
+plain do-nothing if the compensation is correct. Isolated via `check_ego_compensation.py`:
+- Confirmed NOT a prev/curr direction bug (tested both orderings, both regress similarly:
+  -0.673 vs -0.706).
+- Confirmed the real ego-motion values themselves are sane (checked directly: 0.07-0.77m
+  for the first 5 clips; full-scene check showed up to 6.34m for high-motion segments).
+- **Root cause identified:** the `pc_range` clamp in `apply_update_rule` (added earlier
+  for tiny LEARNED deltas near the z-boundary) was never designed for a REAL rigid
+  ego-motion shift of several meters. Stage A fills Gaussians out to the pc_range
+  boundary; a multi-meter shift routinely pushes trailing-edge Gaussians outside the
+  valid volume. The clamp then smeared their POSITION onto the boundary wall as
+  visible, geometrically WRONG content (confirmed: disabling the clamp entirely crashes
+  `LocalAggregator`'s hard bounds assertion, proving real, substantial out-of-range
+  displacement -- not a marginal edge case).
+- **Fix applied:** `apply_update_rule` now zeros the OPACITY of any Gaussian whose
+  pre-clamp position falls outside `pc_range`, in addition to clamping position (clamping
+  position alone is still required to satisfy the splat kernel's hard bounds check;
+  opacity=0 makes the clamped position invisible rather than a wrong visible smear).
+  Regression-checked against Phase 4's exit-checklist suite (unaffected, uses
+  `pc_range=None`).
+
+**Result after the fix -- and a genuine, non-bug limitation discovered:**
+- Re-ran the do-nothing vs ego_only (zero learned residual) comparison: opacity fix made
+  no meaningful difference in aggregate (-0.654, essentially unchanged from -0.673/-0.706
+  pre-fix).
+- **Per-scene breakdown was the decisive test:** `scene-1100` (near-zero real ego motion,
+  max 0.33m) showed `ego_only` vs `donothing` delta = +0.045 -- essentially neutral,
+  exactly what correctly-working near-no-op compensation should produce. `scene-1094`
+  (real motion up to 6.34m, mean 3.24m) showed delta = -1.193 -- substantial degradation,
+  scaling with real motion magnitude.
+- **Conclusion: the compensation mechanism itself is confirmed correct** (a bug would
+  degrade the near-zero-motion scene too; it doesn't). The degradation at high motion is
+  a genuine, different limitation: Stage B works with a FIXED set of 6400 Gaussians
+  carried forward from frame 0. When the ego vehicle moves substantially, newly-visible
+  world content enters the leading edge of the `pc_range` window with NO Gaussian
+  representing it at all -- a representational gap, not a coding defect. Larger motion
+  means more unrepresented new content, exactly matching the observed scaling.
+
+**Decision / next steps (not yet pursued):**
+1. Check the real-motion distribution across ALL clips (not just these two scenes) to
+   see whether the typical nuScenes 2Hz frame gap is closer to scene-1100's low-motion
+   case or scene-1094's high-motion case -- determines whether compensation nets positive
+   in aggregate despite the high-motion failure mode.
+2. Consider whether to accept the "no Gaussian spawning" limitation as a documented,
+   reportable finding, or pursue a real architectural addition (a mechanism to
+   spawn/reactivate Gaussians for newly-visible regions) -- a genuine research direction,
+   not a quick fix.
+3. Re-run the step-matched 1/3/6/8 scene-scaling sweep (Part 2) now that ego-compensation
+   exists, to see whether it changes the scene-scaling picture.

@@ -148,6 +148,92 @@ class DeformHeadR(nn.Module):
 # ---------------------------------------------------------------------------
 
 
+def rotmat_to_quat(R: torch.Tensor) -> torch.Tensor:
+    """Converts a batch of 3x3 rotation matrices to unit quaternions (w, x, y, z),
+    scalar-first, matching this module's convention throughout.
+
+    Added for Stage B ego-motion compensation (EXPERIMENT_LOG.md): measured GT motion
+    showed 60-84% of voxels changing label between adjacent frames, dominated by
+    ego-vehicle motion (occ_label is ego-centric per frame), not independent object
+    motion. This lets the KNOWN relative ego rotation be composed onto each Gaussian's
+    orientation directly, so the learned Phi_r only needs to capture the residual
+    (independent object rotation), not the dominant ego-motion component.
+
+    Uses a single-branch ("always positive w") formulation with a clamped sqrt --
+    simple and numerically fine for the small-angle rotations expected here (ego yaw
+    change over one ~0.5s nuScenes keyframe gap), hand-verified against known cases
+    (identity, a 5-degree yaw) and a round-trip reconstruction. NOT a general-purpose
+    replacement for a full branch-selecting (Shepperd's method) implementation --
+    would lose precision near 180-degree rotations, which never occur in this setting.
+
+    R: (..., 3, 3). Returns: (..., 4).
+    """
+    m00, m01, m02 = R[..., 0, 0], R[..., 0, 1], R[..., 0, 2]
+    m10, m11, m12 = R[..., 1, 0], R[..., 1, 1], R[..., 1, 2]
+    m20, m21, m22 = R[..., 2, 0], R[..., 2, 1], R[..., 2, 2]
+    trace = m00 + m11 + m22
+    qw = torch.sqrt(torch.clamp((trace + 1.0) / 4.0, min=1e-8))
+    qx = (m21 - m12) / (4.0 * qw)
+    qy = (m02 - m20) / (4.0 * qw)
+    qz = (m10 - m01) / (4.0 * qw)
+    quat = torch.stack([qw, qx, qy, qz], dim=-1)
+    return quat_normalize(quat)
+
+
+def compute_relative_transform(pose_prev: torch.Tensor, pose_curr: torch.Tensor) -> torch.Tensor:
+    """pose_prev, pose_curr: (4, 4) homogeneous poses mapping LOCAL coordinates (at
+    that frame's own timestamp) into a shared global frame (e.g. lidar2global).
+    Returns T (4, 4) such that a point in pose_prev's local frame maps into
+    pose_curr's local frame: p_curr_h = T @ p_prev_h.
+
+    Hand-verified: a static world point, transformed via this T, lands at exactly the
+    position a direct world-to-local computation gives -- confirmed with a synthetic
+    5m-forward + 3-degree-yaw ego motion test before this was wired into training.
+    """
+    return torch.linalg.inv(pose_curr) @ pose_prev
+
+
+def apply_ego_compensated_update_rule(
+    prev_state: GaussianState,
+    delta_mu: torch.Tensor,
+    delta_quat: torch.Tensor,
+    relative_transform: torch.Tensor,
+    pc_range=None,
+) -> GaussianState:
+    """Applies the KNOWN rigid ego-motion transform to prev_state's means/rotations
+    FIRST (no learning involved -- exact, from the dataset's own recorded poses), then
+    applies the LEARNED residual (delta_mu, delta_quat) on top via the existing
+    apply_update_rule, exactly as before. The learned heads now only need to capture
+    what the known ego transform does NOT explain: independent object motion plus any
+    residual error -- a much smaller, more learnable signal than the combined
+    ego+object motion they were previously asked to predict from scratch.
+
+    relative_transform: (4, 4), from compute_relative_transform(pose_prev, pose_curr).
+    """
+    R_ego = relative_transform[:3, :3]
+    t_ego = relative_transform[:3, 3]
+
+    means = prev_state.means
+    means_flat = means.squeeze(0) if means.dim() == 3 else means  # (N, 3)
+    means_ego = means_flat @ R_ego.transpose(0, 1) + t_ego  # (N, 3)
+    if means.dim() == 3:
+        means_ego = means_ego.unsqueeze(0)
+
+    q_ego = rotmat_to_quat(R_ego.unsqueeze(0))  # (1, 4)
+    rotations = prev_state.rotations
+    rot_flat = rotations.squeeze(0) if rotations.dim() == 3 else rotations  # (N, 4)
+    rot_ego = quat_normalize(quat_multiply(q_ego.expand_as(rot_flat), rot_flat))
+    if rotations.dim() == 3:
+        rot_ego = rot_ego.unsqueeze(0)
+
+    ego_compensated_state = GaussianState(
+        means=means_ego, rotations=rot_ego,
+        scales=prev_state.scales, opacities=prev_state.opacities,
+        semantics=prev_state.semantics,
+    )
+    return apply_update_rule(ego_compensated_state, delta_mu, delta_quat, pc_range=pc_range)
+
+
 def apply_update_rule(
     prev_state: GaussianState,
     delta_mu: torch.Tensor,
@@ -160,23 +246,35 @@ def apply_update_rule(
     read -> deform -> write steps stay visible and separately testable.
 
     pc_range (optional, [xmin,ymin,zmin,xmax,ymax,zmax]): if given, clamps
-    new_means into this range as a defense-in-depth backstop, in case
-    DeformHeadMu's own tanh bound plus an already-near-boundary prev_state
-    position still pushes a Gaussian outside GaussianHead's splat kernel's
-    valid volume (confirmed necessary in practice -- see DeformHeadMu's
-    docstring for the real crash this guards against). Defaults to None
-    (no clamp) so Phase 4's toy-sequence test, which uses synthetic
-    coordinates with no relation to Occ3D's real pc_range, is unaffected."""
+    new_means into this range as a defense-in-depth backstop.
+
+    FIX (EXPERIMENT_LOG.md, ego-motion compensation debugging): originally only
+    clamped position, leaving opacity untouched. Fine when the only source of
+    out-of-range deltas was tiny LEARNED corrections -- but ego-motion compensation
+    applies a REAL rigid shift (confirmed up to 6+ meters between real held-out
+    frames), routinely pushing Gaussians already near +/-40m outside the valid volume.
+    Clamping only position smeared them onto the boundary wall as visible WRONG
+    content (confirmed measurably worse than doing nothing via a direct do-nothing vs
+    ego-compensated-zero-residual comparison). Now any Gaussian whose pre-clamp
+    position falls outside pc_range also has its opacity zeroed -- honest "no data
+    here" instead of a visible but geometrically wrong smear.
+    """
     new_means = prev_state.means + delta_mu
+    new_opacities = prev_state.opacities
     if pc_range is not None:
         lo = new_means.new_tensor(pc_range[:3])
-        hi = new_means.new_tensor(pc_range[3:])
+        eps = 1e-3
+        hi = new_means.new_tensor(pc_range[3:]) - eps
+        out_of_range = ((new_means < lo) | (new_means > hi)).any(dim=-1, keepdim=True)
         new_means = torch.clamp(new_means, min=lo, max=hi)
+        new_opacities = torch.where(
+            out_of_range, torch.zeros_like(prev_state.opacities), prev_state.opacities
+        )
     new_rotations = quat_normalize(quat_multiply(delta_quat, prev_state.rotations))
     return GaussianState(
         means=new_means,
         rotations=new_rotations,
         scales=prev_state.scales,
-        opacities=prev_state.opacities,
+        opacities=new_opacities,
         semantics=prev_state.semantics,
     )

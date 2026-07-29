@@ -8,6 +8,9 @@ from .deform_heads import (
     quat_multiply,
     quat_normalize,
     axis_angle_to_quat,
+    rotmat_to_quat,
+    compute_relative_transform,
+    apply_ego_compensated_update_rule,
 )
 
 __all__ = [
@@ -23,4 +26,7 @@ __all__ = [
     "quat_multiply",
     "quat_normalize",
     "axis_angle_to_quat",
+    "rotmat_to_quat",
+    "compute_relative_transform",
+    "apply_ego_compensated_update_rule",
 ]

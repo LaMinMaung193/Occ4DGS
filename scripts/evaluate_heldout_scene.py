@@ -49,30 +49,20 @@ import json  # noqa: E402
 from run_stage_a_frame0 import build_pipeline, to_batch_of_one  # noqa: E402
 
 
-HELDOUT_SCENE = "scene-0103"  # confirmed distinct from SCENES=["scene-0061"] used to
-                                # train both Stage A and Stage B -- true held-out test
+HELDOUT_SCENES = ["scene-1094", "scene-1100"]  # the permanent held-out validation
+                                                  # pair -- confirmed never in either
+                                                  # Stage A's or Stage B's SCENES
 
 
 def main():
     nusc = load_nuscenes(os.path.join(REPO_ROOT, "data", "nuscenes_mini"))
     with open(os.path.join(REPO_ROOT, "experiments", "phase1_frame_index.json")) as f:
         full_frame_index = json.load(f)
-    frame_index = {HELDOUT_SCENE: full_frame_index[HELDOUT_SCENE]}
-
-    base_dataset = Occ4DGSDataset(
-        nusc, frame_index,
-        os.path.join(REPO_ROOT, "data", "nuscenes_mini"),
-        os.path.join(REPO_ROOT, "data", "occ3d_gts"),
-        pipeline=build_pipeline(),
-    )
-    clip_dataset = Occ4DGSClipDataset(base_dataset, unroll_window=2)
-    print(f"HELD-OUT scene {HELDOUT_SCENE}: {len(clip_dataset)} clips "
-          f"(never used to train Stage A or Stage B)")
 
     cfg = Config.fromfile(os.path.join(GF3D_ROOT, "config", "occ4dgs_mini_occ3d_gs6400.py"))
-    segmentor = build_stage_a(cfg)  # loads stage_a_best.pth, frozen+eval, per train_stage1.py
+    segmentor = build_stage_a(cfg)  # loads stage_a_best.pth (8-scene checkpoint), frozen+eval
 
-    pool, hypernet, deform_mu, deform_r = build_temporal_module()
+    pool, hypernet, deform_mu, deform_r, feature_dropout, z_dropout = build_temporal_module()
     temporal_ckpt_path = os.path.join(
         REPO_ROOT, "experiments", "stage_b_temporal_checkpoints", "stage1_warmup_temporal.pth"
     )
@@ -81,7 +71,7 @@ def main():
     hypernet.load_state_dict(temporal_ckpt["hypernet"])
     deform_mu.load_state_dict(temporal_ckpt["deform_mu"])
     deform_r.load_state_dict(temporal_ckpt["deform_r"])
-    for m in (pool, hypernet, deform_mu, deform_r):
+    for m in (pool, hypernet, deform_mu, deform_r, feature_dropout, z_dropout):
         m.eval()
     print(f"Loaded trained temporal module (trained on {temporal_ckpt['trained_on_scenes']}, "
           f"{temporal_ckpt['n_epochs']} epochs): {temporal_ckpt_path}")
@@ -90,44 +80,55 @@ def main():
     encoder = CurrentFrameEncoder(segmentor)
     loss_func = OPENOCC_LOSS.build(cfg.loss).cuda()
 
-    miou_trained = MeanIoU(list(range(1, 17)), 17, CLASS_NAMES, True, 17, filter_minmax=False)
-    miou_donothing = MeanIoU(list(range(1, 17)), 17, CLASS_NAMES, True, 17, filter_minmax=False)
-    miou_trained.reset()
-    miou_donothing.reset()
+    for heldout_scene in HELDOUT_SCENES:
+        frame_index = {heldout_scene: full_frame_index[heldout_scene]}
+        base_dataset = Occ4DGSDataset(
+            nusc, frame_index,
+            os.path.join(REPO_ROOT, "data", "nuscenes_mini"),
+            os.path.join(REPO_ROOT, "data", "occ3d_gts"),
+            pipeline=build_pipeline(),
+        )
+        clip_dataset = Occ4DGSClipDataset(base_dataset, unroll_window=2)
+        print(f"\nHELD-OUT scene {heldout_scene}: {len(clip_dataset)} clips "
+              f"(never used to train Stage A or Stage B)")
 
-    with torch.no_grad():
-        for clip_idx in range(len(clip_dataset)):
-            frame0_dict, frame1_dict = clip_dataset[clip_idx]
-            cuda0 = to_cuda(to_batch_of_one(frame0_dict))
-            cuda1 = to_cuda(to_batch_of_one(frame1_dict))
+        miou_trained = MeanIoU(list(range(1, 17)), 17, CLASS_NAMES, True, 17, filter_minmax=False)
+        miou_donothing = MeanIoU(list(range(1, 17)), 17, CLASS_NAMES, True, 17, filter_minmax=False)
+        miou_trained.reset()
+        miou_donothing.reset()
 
-            g0, g0_dict = get_real_g0(segmentor, cuda0)
+        with torch.no_grad():
+            for clip_idx in range(len(clip_dataset)):
+                frame0_dict, frame1_dict = clip_dataset[clip_idx]
+                cuda0 = to_cuda(to_batch_of_one(frame0_dict))
+                cuda1 = to_cuda(to_batch_of_one(frame1_dict))
 
-            g1_trained = deform_one_step(g0, encoder, pool, hypernet,
-                                          deform_mu, deform_r, cuda1)
-            _, _, head_out_trained = splat_and_loss(
-                segmentor, g1_trained, type(g0_dict), cuda1, cfg, loss_func
-            )
-            _, _, head_out_donothing = splat_and_loss(
-                segmentor, g0, type(g0_dict), cuda1, cfg, loss_func
-            )
+                g0, g0_dict = get_real_g0(segmentor, cuda0)
 
-            gt_occ = head_out_trained["sampled_label"][0]
-            mask = head_out_trained["occ_mask"].flatten(1)[0].bool()
-            pred_trained = head_out_trained["pred_occ"][-1][0].argmax(0)
-            pred_donothing = head_out_donothing["pred_occ"][-1][0].argmax(0)
+                g1_trained = deform_one_step(g0, encoder, pool, hypernet,
+                                              deform_mu, deform_r, feature_dropout,
+                                              z_dropout, cuda0, cuda1)
+                _, _, head_out_trained = splat_and_loss(
+                    segmentor, g1_trained, type(g0_dict), cuda1, cfg, loss_func
+                )
+                _, _, head_out_donothing = splat_and_loss(
+                    segmentor, g0, type(g0_dict), cuda1, cfg, loss_func
+                )
 
-            miou_trained._after_step(pred_trained, gt_occ, mask)
-            miou_donothing._after_step(pred_donothing, gt_occ, mask)
+                gt_occ = head_out_trained["sampled_label"][0]
+                mask = head_out_trained["occ_mask"].flatten(1)[0].bool()
+                pred_trained = head_out_trained["pred_occ"][-1][0].argmax(0)
+                pred_donothing = head_out_donothing["pred_occ"][-1][0].argmax(0)
 
-    miou_t, iou2_t = miou_trained._after_epoch()
-    miou_d, iou2_d = miou_donothing._after_epoch()
-    print(f"\n=== HELD-OUT ({HELDOUT_SCENE}) RESULTS ===")
-    print(f"Trained:    mIoU={miou_t}, iou2={iou2_t}")
-    print(f"Do-nothing: mIoU={miou_d}, iou2={iou2_d}")
-    print(f"Delta:      mIoU={miou_t - miou_d:+.4f}, iou2={iou2_t - iou2_d:+.4f}")
-    print("\nCompare against scene-0061 in-sample: Trained=16.252/28.808, "
-          "Do-nothing=14.898/23.943, Delta=+1.354/+4.865")
+                miou_trained._after_step(pred_trained, gt_occ, mask)
+                miou_donothing._after_step(pred_donothing, gt_occ, mask)
+
+        miou_t, iou2_t = miou_trained._after_epoch()
+        miou_d, iou2_d = miou_donothing._after_epoch()
+        print(f"=== HELD-OUT ({heldout_scene}) RESULTS ===")
+        print(f"Trained:    mIoU={miou_t}, iou2={iou2_t}")
+        print(f"Do-nothing: mIoU={miou_d}, iou2={iou2_d}")
+        print(f"Delta:      mIoU={miou_t - miou_d:+.4f}, iou2={iou2_t - iou2_d:+.4f}")
 
 
 if __name__ == "__main__":

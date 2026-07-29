@@ -186,6 +186,16 @@ class Occ4DGSDataset(Dataset):
             "occ_label": input_dict["occ_label"],
             "occ_xyz": input_dict["occ_xyz"],
             "occ_cam_mask": input_dict["occ_cam_mask"],
+            # Added for Stage B ego-motion compensation (EXPERIMENT_LOG.md): measured
+            # GT motion showed 60-84% of voxels changing label between adjacent frames,
+            # dominated by ego-vehicle motion (occ_label is ego-centric per frame), not
+            # independent object motion. Both poses passed through -- FLAGGED, not yet
+            # resolved which one matches the Gaussians' own coordinate frame:
+            # ego2global (vehicle-body-centered) vs lidar2global (LiDAR-sensor-centered,
+            # more likely correct given occ_annotation="occ3d"'s LiDAR-centric
+            # convention confirmed in safe_ops.py's pc_range_3) -- confirm before use.
+            "ego2global": input_dict["ego2global"],
+            "lidar2global": input_dict["lidar2global"],
         }
         for k in ("points", "img_filename", "dpt", "occ3d_mask_camera", "pts_filename"):
             if k in input_dict:

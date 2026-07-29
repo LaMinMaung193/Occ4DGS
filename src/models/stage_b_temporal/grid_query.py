@@ -67,6 +67,7 @@ def query_motion_grid(
     means: torch.Tensor,
     grids: List[torch.Tensor],
     pc_range: Sequence[float],
+    include_pe: bool = True,
 ) -> torch.Tensor:
     """
     For every Gaussian, trilinearly sample each grid level at its (normalized)
@@ -99,7 +100,10 @@ def query_motion_grid(
         )  # (1, C, N, 1, 1)
         c = grid.shape[1]
         sampled = sampled.view(c, n).transpose(0, 1)  # (N, C)
-        pe = positional_encoding(norm_means, level)  # (N, 6)
-        per_level_feats.append(torch.cat([sampled, pe], dim=-1))
+        if include_pe:
+            pe = positional_encoding(norm_means, level)  # (N, 6)
+            per_level_feats.append(torch.cat([sampled, pe], dim=-1))
+        else:
+            per_level_feats.append(sampled)
 
     return torch.cat(per_level_feats, dim=-1)  # (N, L * (C + 6))

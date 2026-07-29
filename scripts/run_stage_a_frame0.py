@@ -69,6 +69,10 @@ def to_batch_of_one(sample_dict):
         "occ_label": torch.from_numpy(sample_dict["occ_label"]).unsqueeze(0).long(),
         "occ_cam_mask": torch.from_numpy(sample_dict["occ_cam_mask"]).unsqueeze(0).bool(),
     }
+    if "ego2global" in sample_dict:
+        metas["ego2global"] = torch.from_numpy(sample_dict["ego2global"]).unsqueeze(0).float()
+    if "lidar2global" in sample_dict:
+        metas["lidar2global"] = torch.from_numpy(sample_dict["lidar2global"]).unsqueeze(0).float()
 
     points = [torch.from_numpy(sample_dict["points"].tensor.numpy()
                                 if hasattr(sample_dict["points"], "tensor")

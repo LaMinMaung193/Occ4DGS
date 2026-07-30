@@ -721,3 +721,115 @@ plain do-nothing if the compensation is correct. Isolated via `check_ego_compens
    not a quick fix.
 3. Re-run the step-matched 1/3/6/8 scene-scaling sweep (Part 2) now that ego-compensation
    exists, to see whether it changes the scene-scaling picture.
+
+
+---
+
+## [Phase 5] Run ID: 2026-07-29-ego-motion-distribution-check
+
+- Command: scripts/measure_ego_motion_distribution.py, all 10 scenes, 394 clips total.
+- Result: translation magnitude is NOT concentrated at low values. Median 2.527m,
+  p75=4.438m, p90=6.122m. 44.4% of all clips exceed 3.0m (the threshold where
+  scene-1094 showed confirmed real damage in the ego-compensation test). Several
+  scenes (scene-0796 mean 6.07m, scene-1077 mean 6.30m) are consistently high-motion.
+  Only ~27% of clips are near-stationary (<0.5m, the safe regime scene-1100 represented).
+- Conclusion: the Gaussian-representational gap (fixed 6400 Gaussians, no mechanism
+  for newly-visible content after ego motion) is the DOMINANT regime at this frame
+  rate, not a rare edge case. Explains why aggregate ego_only result was net negative
+  despite being neutral/positive in the low-motion case -- high-motion clips (~44%
+  of data) dominate the average and show much larger per-clip damage.
+- Decision: build the Gaussian-recycling mechanism (reposition/reactivate
+  out-of-range Gaussians into newly-visible regions, rather than discarding via
+  opacity=0) -- this is the majority-case fix, not a corner-case one, and is
+  buildable with current 8/10-scene data since it's a representational-capacity fix,
+  not a data-volume fix.
+
+  ---
+
+  ## [Phase 5] Run ID: 2026-07-30-spawnhead-and-full-arc-retrospective
+
+### SpawnHead implementation and test
+
+- New: src/models/stage_b_temporal/spawn_head.py -- SpawnHead, a small learned MLP
+  replacing the heuristic recycling attempt. Conditioned on (a) the motion grid's own
+  feature at a candidate position (query_motion_grid, include_pe=False) and (b) the
+  pooled global scene feature; predicts a position refinement, opacity, and semantics
+  for each Gaussian pushed out of pc_range by ego-motion compensation, rather than the
+  fixed-opacity/random-placement/stale-semantics heuristic.
+- Design fix made during implementation: replaced RANDOM jitter in the wraparound base
+  position with a FIXED deterministic margin (RECYCLE_MARGIN_FRAC=0.10). Necessary
+  because SpawnHead must query the grid at a candidate position BEFORE the final
+  update-rule call (different file/function) -- a random jitter computed twice would
+  land in two inconsistent positions. Hand-verified: precomputed candidate positions
+  match final applied positions exactly (bit-for-bit) given the same inputs.
+- Wired into train_stage1.py's deform_one_step, build_temporal_module,
+  evaluate_heldout, and checkpointing (backward-compatible: spawn_head=None preserves
+  all prior behavior exactly, confirmed via Phase 4 regression test).
+- Result (n=8 scenes, step-matched, same seed/schedule as the no-SpawnHead run):
+  small, fairly consistent improvement over plain opacity-zeroing at every checkpoint
+  (+0.02 to +0.09 in held-out adjusted mIoU delta), e.g. opt_step 100: -1.666 vs
+  -1.758; final (opt_step 1580): -1.487 vs -1.508.
+- CRITICAL OBSERVATION: despite this real, positive delta, the CURVE SHAPE is
+  essentially unchanged from every prior version -- starts near -0.7 to -0.8 at the
+  first checkpoint, degrades sharply over ~100-200 steps to -1.4 to -1.8, plateaus
+  there for the remainder of training. SpawnHead shifted the whole curve up slightly
+  (an additive correction) without changing the underlying trajectory.
+
+### Full-session retrospective: which fixes helped, which didn't, and the net effect
+
+Genuine corrections (necessary regardless of outcome, not expected to be "the fix"):
+training Stage A from scratch, matching Stage B's scope to Stage A's, step-matched
+(not epoch-matched) evaluation, opacity-zeroing on out-of-range Gaussians.
+
+Measurably helped:
+- Delta-feature conditioning (Step 2): the single clearest positive result all
+  session. Fixed the confirmed absolute-scene-appearance shortcut, moving epoch-1
+  held-out delta from -1.15 to -0.01 (near parity).
+- SpawnHead: small, consistent, real improvement over opacity-zeroing (this entry).
+
+No measurable effect (tested honestly, no benefit found):
+- Step 1 regularization (dropout, weight decay, motion-magnitude penalty).
+- Removing positional encoding (PE(mu)) from z.
+- Heuristic recycling (random wraparound + fixed opacity, superseded by SpawnHead).
+
+HONEST NET EFFECT ACROSS THE WHOLE SESSION: the single BEST held-out result achieved
+at any point this session was -0.013 to -0.117 (right after Step 2's delta-
+conditioning fix alone, BEFORE ego-motion compensation existed). Every addition since
+then -- compensation, the opacity fix, recycling, SpawnHead -- has produced a
+best-achieved delta between -0.7 and -0.78. Each individual addition was correctly
+implemented and independently well-motivated (compensation's math is confirmed
+correct; the opacity fix corrected a real bug; SpawnHead measurably beats the
+heuristic it replaced) -- but STACKED TOGETHER, they have made the best-case result
+meaningfully WORSE than a single earlier fix alone, not better.
+
+Decision on the "no effect" fixes: NOT retiring them, but not reincorporating them
+yet either.
+  - Heuristic recycling: fully superseded by SpawnHead, will not be revisited.
+  - Regularization (dropout/weight-decay/motion-penalty): specifically remedies
+    excess capacity relative to available data (closes overfitting gaps). If the
+    dominant problem is genuinely a data-scale ceiling (increasingly likely -- see
+    below), this class of fix would not be expected to help regardless of what else
+    changes, since it cannot create signal that isn't there. Worth retesting only
+    after the data situation itself changes (more scenes), not as an immediate step.
+  - PE removal: cheap, low-risk, not tied to the data-scale question specifically
+    (was testing a shortcut hypothesis). Reasonable to fold back into a future clean
+    run whenever convenient.
+  - Explicit caution logged: do NOT reincorporate multiple of these simultaneously in
+    one run -- that is exactly the stacking pattern that produced the net-negative
+    result documented above. Any reintroduction should be tested one change at a
+    time against a clean, single-variable baseline.
+
+KEY STANDING QUESTION, NOT YET RESOLVED: the same sharp-degradation-then-plateau
+curve shape has now persisted, essentially unchanged, across every structural
+intervention tried (delta-conditioning aside, which changed only the STARTING point,
+not this shape) -- regularization, PE removal, compensation, recycling, SpawnHead.
+This consistency across so many different architectural angles is itself evidence
+that something more fundamental (very plausibly the same data-scale ceiling already
+confirmed for Stage A) is the dominant driver, not a supporting factor as assumed
+when ego-motion compensation work began. NEXT STEP (not yet done): directly compare
+the pre-compensation best state (delta-conditioning alone) against the current
+full-pipeline state, to decide whether to continue building on compensation or revert
+to that earlier, better-performing baseline and treat the Gaussian-representational
+gap as a documented, separate finding rather than an actively pursued fix.
+
+---

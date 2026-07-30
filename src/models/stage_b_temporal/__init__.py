@@ -1,6 +1,7 @@
 from .buffer import GaussianState, ReferenceBuffer
 from .hypernet import MotionHyperNet
 from .grid_query import query_motion_grid, positional_encoding, normalize_means
+from .spawn_head import SpawnHead
 from .deform_heads import (
     DeformHeadMu,
     DeformHeadR,
@@ -11,8 +12,8 @@ from .deform_heads import (
     rotmat_to_quat,
     compute_relative_transform,
     apply_ego_compensated_update_rule,
+    compute_spawn_candidate_positions,
 )
-
 __all__ = [
     "GaussianState",
     "ReferenceBuffer",
@@ -20,6 +21,7 @@ __all__ = [
     "query_motion_grid",
     "positional_encoding",
     "normalize_means",
+    "SpawnHead",
     "DeformHeadMu",
     "DeformHeadR",
     "apply_update_rule",
@@ -29,4 +31,5 @@ __all__ = [
     "rotmat_to_quat",
     "compute_relative_transform",
     "apply_ego_compensated_update_rule",
+    "compute_spawn_candidate_positions",
 ]

@@ -2,24 +2,20 @@
 scripts/train_stage1.py
 
 Phase 5 step 3: real stage_1_warmup training loop.
-History of fixes, in order: held-out tracking (Step 0) -> delta-feature conditioning
-(Step 2, fixed the absolute-scene-appearance shortcut) -> dropout/weight-decay/motion-
-penalty regularization (Step 1, no effect) -> PE(mu) removal ablation (no effect).
-
-THIS VERSION: fixes a confound discovered in the 1/3/6/8-scene sweep -- held-out
-checks were gated by EPOCH index, but epoch != amount of training when clip counts
-differ 8x across scene counts (n=1: 38 clips/epoch; n=8: 316 clips/epoch). By "epoch 1"
-n=8 had done ~8x more optimizer steps than n=1, so the sweep's apparent "more scenes ->
-worse held-out delta" trend was confounded with "more optimizer steps -> worse held-out
-delta" (which every single prior experiment, regardless of what else changed, has shown
-as a consistent decay curve). Fix: gate held-out checks by OPTIMIZER STEP COUNT, not
-epoch, so all scene-count runs are compared on the same step axis.
+History (see EXPERIMENT_LOG.md for full detail): held-out tracking (Step 0) ->
+delta-feature conditioning (Step 2) -> regularization (Step 1, no effect) -> PE
+removal (no effect) -> step-matched scene-scaling sweep (found the fixed-Gaussian-
+budget representational gap, confirmed the majority regime at 44.4% of clips) ->
+ego-motion compensation (mechanism confirmed correct via near-zero-motion-scene test,
+but combined with the learned residual it made held-out results WORSE than
+do-nothing, because opacity-zeroing throws away real information the residual cannot
+recover) -> heuristic recycling (no improvement) -> THIS VERSION: learned SpawnHead
+(src/models/stage_b_temporal/spawn_head.py), conditioned on the motion grid's own
+feature at a fixed candidate position plus global pooled context, replacing the
+heuristic's fixed opacity / random placement / stale inherited semantics.
 
 Usage:
     PYTHONNOUSERSITE=1 python scripts/train_stage1.py [N_SCENES]
-    -- N_SCENES (default: all 8) selects the first N scenes of ALL_TRAINED_SCENES
-       (neutral order), all evaluated against the SAME already-trained 8-scene Stage A
-       checkpoint and the SAME fixed seed, for the scene-scaling sweep.
 """
 import os
 import sys
@@ -54,6 +50,8 @@ from src.models.stage_b_temporal import (  # noqa: E402
     apply_update_rule,
     compute_relative_transform,
     apply_ego_compensated_update_rule,
+    compute_spawn_candidate_positions,
+    SpawnHead,
 )
 from src.models.stage_b_temporal.current_frame_encoder import CurrentFrameEncoder  # noqa: E402
 from src.models.stage_b_temporal.pool_features import PoolFeatures  # noqa: E402
@@ -82,12 +80,17 @@ SCENES = ALL_TRAINED_SCENES[:_n_scenes_arg]
 
 N_EPOCHS = 20
 HELDOUT_SCENES = ["scene-1094", "scene-1100"]
-EVAL_EVERY_OPT_STEPS = 20  # STEP-based, not epoch-based (see module docstring)
+EVAL_EVERY_OPT_STEPS = 20
 GRAD_ACCUM_STEPS = 4
 LR = 1e-4
 WEIGHT_DECAY = 0.05
 DROPOUT_P = 0.2
 MOTION_PENALTY_WEIGHT = 0.01
+
+USE_SPAWN_HEAD = True
+SPAWN_GRID_FEAT_DIM = 48
+SPAWN_POOLED_DIM = 128
+SPAWN_MAX_OFFSET = 2.0
 
 
 def to_cuda(batch):
@@ -123,7 +126,13 @@ def build_temporal_module():
     deform_r = DeformHeadR(in_dim=3 * 16, hidden_dim=128, max_angle_rad=0.3).cuda()
     feature_dropout = nn.Dropout(p=DROPOUT_P).cuda()
     z_dropout = nn.Dropout(p=DROPOUT_P).cuda()
-    return pool, hypernet, deform_mu, deform_r, feature_dropout, z_dropout
+    spawn_head = None
+    if USE_SPAWN_HEAD:
+        spawn_head = SpawnHead(
+            grid_feat_dim=SPAWN_GRID_FEAT_DIM, pooled_dim=SPAWN_POOLED_DIM,
+            hidden_dim=128, semantic_dim=17, max_offset=SPAWN_MAX_OFFSET,
+        ).cuda()
+    return pool, hypernet, deform_mu, deform_r, feature_dropout, z_dropout, spawn_head
 
 
 def get_real_g0(segmentor, cuda0):
@@ -145,7 +154,7 @@ def get_real_g0(segmentor, cuda0):
 
 def deform_one_step(g_prev, encoder, pool, hypernet, deform_mu, deform_r,
                      feature_dropout, z_dropout, cuda_prev, cuda_curr,
-                     no_grad_encoder=True, return_deltas=False):
+                     spawn_head=None, no_grad_encoder=True, return_deltas=False):
     ctx = torch.no_grad() if no_grad_encoder else torch.enable_grad()
     with ctx:
         ms_img_feats_prev, _dpt_dist_prev, out_dpt_multiscale_prev = encoder.encode(
@@ -167,8 +176,18 @@ def deform_one_step(g_prev, encoder, pool, hypernet, deform_mu, deform_r,
     pose_prev = cuda_prev["metas"]["lidar2global"][0]
     pose_curr = cuda_curr["metas"]["lidar2global"][0]
     relative_transform = compute_relative_transform(pose_prev, pose_curr)
+
+    spawn_offset = spawn_opacity = spawn_semantics = None
+    if spawn_head is not None:
+        wrapped_base, _out_of_range = compute_spawn_candidate_positions(
+            means_flat, delta_mu, relative_transform, PC_RANGE
+        )
+        z_candidate = query_motion_grid(wrapped_base, grids, PC_RANGE, include_pe=False)
+        spawn_offset, spawn_opacity, spawn_semantics = spawn_head(z_candidate, pooled_delta)
+
     g_t = apply_ego_compensated_update_rule(
-        g_prev, delta_mu, delta_r, relative_transform, pc_range=PC_RANGE
+        g_prev, delta_mu, delta_r, relative_transform, pc_range=PC_RANGE,
+        spawn_offset=spawn_offset, spawn_opacity=spawn_opacity, spawn_semantics=spawn_semantics,
     )
     if return_deltas:
         return g_t, delta_mu, delta_r
@@ -217,9 +236,11 @@ def build_heldout_clip_datasets(nusc, full_frame_index):
 
 def evaluate_heldout(segmentor, encoder, pool, hypernet, deform_mu, deform_r,
                       feature_dropout, z_dropout, cfg, loss_func,
-                      heldout_clip_datasets, mode):
+                      heldout_clip_datasets, mode, spawn_head=None):
     assert mode in ("trained", "donothing", "ego_only")
-    modules = (pool, hypernet, deform_mu, deform_r, feature_dropout, z_dropout)
+    modules = [pool, hypernet, deform_mu, deform_r, feature_dropout, z_dropout]
+    if spawn_head is not None:
+        modules.append(spawn_head)
     for m in modules:
         m.eval()
     miou = MeanIoU(list(range(1, 17)), 17, CLASS_NAMES, True, 17, filter_minmax=False)
@@ -233,7 +254,8 @@ def evaluate_heldout(segmentor, encoder, pool, hypernet, deform_mu, deform_r,
                 g0, g0_dict = get_real_g0(segmentor, cuda0)
                 if mode == "trained":
                     g1 = deform_one_step(g0, encoder, pool, hypernet, deform_mu, deform_r,
-                                          feature_dropout, z_dropout, cuda0, cuda1)
+                                          feature_dropout, z_dropout, cuda0, cuda1,
+                                          spawn_head=spawn_head)
                 elif mode == "ego_only":
                     pose_prev = cuda0["metas"]["lidar2global"][0]
                     pose_curr = cuda1["metas"]["lidar2global"][0]
@@ -270,7 +292,7 @@ def main():
     )
     clip_dataset = Occ4DGSClipDataset(base_dataset, unroll_window=2)
     print(f"{SCENES}: {len(clip_dataset)} clips at unroll_window=2, {N_EPOCHS} epochs, "
-          f"eval every {EVAL_EVERY_OPT_STEPS} OPTIMIZER STEPS (not epochs)")
+          f"eval every {EVAL_EVERY_OPT_STEPS} OPTIMIZER STEPS, SpawnHead={'ON' if USE_SPAWN_HEAD else 'OFF'}")
 
     heldout_clip_datasets = build_heldout_clip_datasets(nusc, full_frame_index)
     print(f"Held-out (never trained): {HELDOUT_SCENES}, "
@@ -280,13 +302,13 @@ def main():
     segmentor = build_stage_a(cfg)
     encoder = CurrentFrameEncoder(segmentor)
     torch.manual_seed(SEED)
-    pool, hypernet, deform_mu, deform_r, feature_dropout, z_dropout = build_temporal_module()
+    pool, hypernet, deform_mu, deform_r, feature_dropout, z_dropout, spawn_head = build_temporal_module()
     loss_func_for_baseline = OPENOCC_LOSS.build(cfg.loss).cuda()
 
     heldout_donothing = evaluate_heldout(
         segmentor, encoder, pool, hypernet, deform_mu, deform_r,
         feature_dropout, z_dropout, cfg, loss_func_for_baseline,
-        heldout_clip_datasets, mode="donothing"
+        heldout_clip_datasets, mode="donothing", spawn_head=spawn_head
     )
     print(f"Held-out do-nothing baseline (adjusted mIoU, fixed reference): "
           f"{heldout_donothing:.3f}")
@@ -295,6 +317,8 @@ def main():
         list(pool.parameters()) + list(hypernet.parameters())
         + list(deform_mu.parameters()) + list(deform_r.parameters())
     )
+    if spawn_head is not None:
+        trainable_params += list(spawn_head.parameters())
     optimizer = torch.optim.AdamW(trainable_params, lr=LR, weight_decay=WEIGHT_DECAY)
     total_steps = N_EPOCHS * len(clip_dataset)
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=total_steps)
@@ -319,7 +343,8 @@ def main():
             buffer = ReferenceBuffer(g0)
             g1, delta_mu, delta_r = deform_one_step(
                 buffer.read(), encoder, pool, hypernet, deform_mu, deform_r,
-                feature_dropout, z_dropout, cuda0, cuda1, return_deltas=True
+                feature_dropout, z_dropout, cuda0, cuda1,
+                spawn_head=spawn_head, return_deltas=True
             )
             buffer.write(g1)
 
@@ -342,7 +367,7 @@ def main():
                     heldout_trained = evaluate_heldout(
                         segmentor, encoder, pool, hypernet, deform_mu, deform_r,
                         feature_dropout, z_dropout, cfg, loss_func,
-                        heldout_clip_datasets, mode="trained"
+                        heldout_clip_datasets, mode="trained", spawn_head=spawn_head
                     )
                     delta = heldout_trained - heldout_donothing
                     line = (f"[opt_step {opt_step_count:5d}] (epoch {epoch:3d})  "
@@ -355,6 +380,8 @@ def main():
                             "hypernet": {k: v.clone() for k, v in hypernet.state_dict().items()},
                             "deform_mu": {k: v.clone() for k, v in deform_mu.state_dict().items()},
                             "deform_r": {k: v.clone() for k, v in deform_r.state_dict().items()},
+                            "spawn_head": ({k: v.clone() for k, v in spawn_head.state_dict().items()}
+                                           if spawn_head is not None else None),
                             "opt_step": opt_step_count,
                             "heldout_delta": delta,
                         }
@@ -378,6 +405,7 @@ def main():
     torch.save({
         "pool": pool.state_dict(), "hypernet": hypernet.state_dict(),
         "deform_mu": deform_mu.state_dict(), "deform_r": deform_r.state_dict(),
+        "spawn_head": spawn_head.state_dict() if spawn_head is not None else None,
         "trained_on_scenes": SCENES, "n_epochs": N_EPOCHS,
         "total_opt_steps": opt_step_count,
     }, final_ckpt_path)
@@ -389,16 +417,17 @@ def main():
         torch.save({
             "pool": best_state["pool"], "hypernet": best_state["hypernet"],
             "deform_mu": best_state["deform_mu"], "deform_r": best_state["deform_r"],
+            "spawn_head": best_state["spawn_head"],
             "trained_on_scenes": SCENES, "n_epochs": N_EPOCHS,
             "best_opt_step": best_state["opt_step"], "best_heldout_delta": best_state["heldout_delta"],
         }, best_ckpt_path)
-        print(f"Saved BEST-held-out-delta temporal module "
-              f"(opt_step {best_state['opt_step']}, delta={best_state['heldout_delta']:+.3f}) "
-              f"to {best_ckpt_path}")
+        print(f"Saved BEST-held-out-delta temporal module (opt_step {best_state['opt_step']}, "
+              f"delta={best_state['heldout_delta']:+.3f}) to {best_ckpt_path}")
 
     print(f"\nSUMMARY for SCENES={SCENES} ({len(SCENES)} scenes, {len(clip_dataset)} "
-          f"clips/epoch, {opt_step_count} total optimizer steps): "
-          f"best held-out delta = {best_heldout_delta:+.3f} at opt_step "
+          f"clips/epoch, {opt_step_count} total optimizer steps, SpawnHead="
+          f"{'ON' if USE_SPAWN_HEAD else 'OFF'}): best held-out delta = "
+          f"{best_heldout_delta:+.3f} at opt_step "
           f"{best_state['opt_step'] if best_state else 'N/A'}")
 
 

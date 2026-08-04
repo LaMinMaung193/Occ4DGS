@@ -107,3 +107,49 @@ def query_motion_grid(
             per_level_feats.append(sampled)
 
     return torch.cat(per_level_feats, dim=-1)  # (N, L * (C + 6))
+
+
+def query_motion_grid_pe_coordinate(
+    means: torch.Tensor,
+    grids: List[torch.Tensor],
+    pc_range: Sequence[float],
+) -> torch.Tensor:
+    """
+    Step 3 (EXPERIMENT_LOG.md, 4DGC reference review): 4DGC's ACTUAL query mechanism,
+    confirmed by direct reading of Motion_Grid.interpolate()/positional_encoding() --
+    NOT the mechanism query_motion_grid implements (which was this project's earlier
+    guess at an ambiguous design_doc_v2.md notation, kept unchanged above as the
+    default/tested path).
+
+    Rather than using the Gaussian's normalized position directly as the grid_sample
+    coordinate, each grid level l is sampled TWICE, using sin(2^l * pi * norm_means)
+    and cos(2^l * pi * norm_means) AS THE SAMPLING COORDINATES THEMSELVES (not
+    concatenated as separate context afterward). Since sin/cos values are naturally
+    bounded to [-1, 1], they are valid grid_sample coordinates directly. Level index l
+    runs coarse-to-fine (matching this project's resolutions tuple ordering, e.g.
+    (8, 16, 32) from Step 2), with frequency 2^l increasing correspondingly -- coarse
+    grids get low-frequency (smooth) coordinate warping, fine grids get high-frequency
+    (more oscillatory) warping, mirroring 4DGC's own index-tied frequency scheme
+    exactly (their grid list and frequency loop share the same index i).
+
+    means: (N, 3) world-space Gaussian means.
+    grids: list of L tensors, each (1, C, r, r, r).
+    Returns: z_t, shape (N, L * 2 * C) -- two samples (sin-coord, cos-coord) per level.
+    """
+    n = means.shape[0]
+    norm_means = normalize_means(means, pc_range)  # (N, 3), in [-1, 1]
+
+    per_level_feats = []
+    for level, grid in enumerate(grids):
+        freq = (2 ** level) * math.pi
+        sin_coord = torch.sin(freq * norm_means)  # (N, 3), naturally in [-1, 1]
+        cos_coord = torch.cos(freq * norm_means)  # (N, 3), naturally in [-1, 1]
+        c = grid.shape[1]
+        for coord in (sin_coord, cos_coord):
+            sample_coords = coord.view(1, n, 1, 1, 3)
+            sampled = F.grid_sample(
+                grid, sample_coords, mode="bilinear", align_corners=True
+            )
+            sampled = sampled.view(c, n).transpose(0, 1)
+            per_level_feats.append(sampled)
+    return torch.cat(per_level_feats, dim=-1)  # (N, L*2*C)

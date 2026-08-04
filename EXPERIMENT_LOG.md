@@ -14,6 +14,11 @@ writing and professor check-ins.
 | 2026-07-16-depth-gt-generation | 2 | — | — | — | — | — | — | — | 2424 depth files generated, cam2img/img2cam bug found+fixed |
 | 2026-07-18-stage-a-first-successful-forward-pass | 2 | 6400 | 1 (single frame) | eval only | n/a | n/a | n/a | 2.84 GB | first full forward pass, 11 bugs resolved |
 | 2026-07-19-stage-a-training-path-validated | 2 | 6400 | 1 (single frame) | Stage A only, overfit | 1e-4 AdamW | 0.1366 (single-frame overfit) | — | 2.84 GB | training path validated, loss 26.70→21.62/200 iters |
+| 2026-07-27-stageA-8scene-final | 5 | 6400 | 1 (single frame) | Stage A only | cosine, 120ep | trained ~16.5 adj. / held-out ~7.07 adj. | — | — | 8/10 scenes trained, scene-1094/scene-1100 fixed as permanent held-out pair |
+| 2026-07-27-stageB-8scene-matched-heldout | 5 | 6400 | 2 | Stage B, delta-conditioned | 1e-4 AdamW | in-sample +1.35 (raw) vs do-nothing; held-out negative | — | — | first fair Stage A/B-matched-scope test; confirms in-sample-positive/held-out-negative pattern |
+| 2026-07-29-gt-motion-and-ego-compensation | 5 | 6400 | 2 | Stage B | 1e-4 AdamW | — | — | — | GT motion 60-84% of voxels, dominated by ego motion (not object motion); ego-motion compensation implemented; pc_range-clamp opacity bug found+fixed; Gaussian-budget representational gap discovered (44.4% of clips exceed damage threshold) |
+| 2026-07-30-steps1-4-clean-baseline | 5 | 6400 | 2 | Stage B, compensation OFF | 1e-4 AdamW | best held-out delta +0.044 → +0.106 across Steps 1-4 | — | — | rotation-order fix, grid resolution/channel rebalance, 4DGC-confirmed PE-as-coordinate query, conv-decoder HyperNet; each a modest real single-run improvement, collapse-then-plateau shape unchanged |
+| 2026-07-30-scene-scaling-sweep-noise-floor | 5 | 6400 | 2 | Stage B | 1e-4 AdamW | n=1/3/6/8: +0.091/+0.125/+0.105/+0.068, no monotonic pattern | — | — | CRITICAL: do-nothing baseline varies ~0.036 run-to-run (should be deterministic) -- same order of magnitude as claimed architecture gains; ALL Step 1-4 and scene-scaling comparisons provisional pending noise-floor measurement; work PAUSED here |
 
 **Note on commit history:** a few commits don't map to a distinct log entry above, since they
 were formatting/checklist-wording fixes rather than new runs: `ea1f404` (corrected Phase 0

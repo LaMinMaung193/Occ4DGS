@@ -172,7 +172,7 @@ parameters are all working correctly together.
 
 ---
 
-## Phase 4 — Stage B skeleton (shape/recursion validation only)
+## Phase 4 — Stage B skeleton (shape/recursion validation only) ✓ COMPLETE
 
 **Goal:** validate the recursive buffer mechanics and tensor shapes with dummy encoders,
 before wiring in real camera/LiDAR features.
@@ -192,51 +192,171 @@ before wiring in real camera/LiDAR features.
 
 **Config used:** `configs/stage_b_temporal.yaml` (structure only, dummy inputs — no training).
 
-**Deliverables:** `src/models/stage_b_temporal/{buffer,hypernet,deform_heads}.py`, a 2-frame
-toy-sequence test script confirming shapes and correct recursive buffer state.
+**Deliverables:** `src/models/stage_b_temporal/{buffer,hypernet,deform_heads}.py`,
+`tests/test_stage_b_skeleton.py` (the 2-frame toy-sequence exit-checklist suite — kept and
+reused as a standing regression check for every architecture change made in Phase 5;
+re-run and confirmed passing after every single one of Phase 5's edits, never broken).
 
 **Exit checklist:**
-- [ ] Buffer state after step 1 is provably `G_1` (deformed), not `G_0` — assert this directly
-      in a unit test, don't eyeball it
-- [ ] All tensor shapes match across the full chain for a 2-frame toy sequence
-- [ ] Quaternion composition (`Δr_t ⊗ r_{t-1}`, normalized) verified numerically on a
-      hand-computed example, not just "runs without error"
+- [x] Buffer state after step 1 is provably `G_1` (deformed), not `G_0` — asserted directly
+      in `test_stage_b_skeleton.py`'s "2-frame toy sequence" test, not eyeballed.
+- [x] All tensor shapes match across the full chain for a 2-frame toy sequence — confirmed,
+      `[PASS] grid_sample coordinate convention`.
+- [x] Quaternion composition (`Δr_t ⊗ r_{t-1}`, normalized) verified numerically on a
+      hand-computed example — confirmed, `[PASS] quaternion composition (hand-computed)`.
+      **Note (Phase 5 correction):** the composition ORDER used in the actual update rule
+      was later found to not match 4DGC's own reference implementation (theirs composes
+      `rotation ⊗ delta`, current-rotation-first; ours originally did `delta ⊗ rotation`,
+      delta-first) — fixed in Phase 5 Step 1. This Phase 4 test validates `quat_multiply`'s
+      raw mathematical correctness as a function, not this specific ordering choice, so it
+      remained valid (and unmodified) throughout that later fix.
 
 **Git tag:** `v0.4-phase4-stageB-skeleton`
 
 ---
 
-## Phase 5 — Real encoders + Stage 1 (frozen warm-up) training
+## Phase 5 — Real encoders + Stage 1 (frozen warm-up) training — **IN PROGRESS, PAUSED**
 
-**Goal:** first real training of the temporal module, Stage A frozen.
+**Original goal (as scoped before this phase began):** wire in real Stage A encoders, train
+`HyperNet, Φ_μ, Φ_r` per the frozen-warm-up schedule, confirm the deformed frame beats a
+"do-nothing" baseline, scale to all 10 scenes.
 
-**Steps:**
-1. Wire in the real (frozen) Stage A camera/LiDAR encoders from Phase 2 as Stage B's current-
-   frame encoder (§2.2 of `design_doc_v2.md` — reuse, don't reimplement). In practice this
-   means reusing `BEVSegmentorLiDAR3D`'s `img_backbone`/`img_neck`/`lidar_voxel_encoder`
-   submodules directly, consistent with Phase 2's reuse-not-reimplement pattern.
-2. Build `F^3D_t = F^d_t ⊗ F^c_t` for the current frame; feed pooled features to `hypernet`.
-3. Train per `configs/stage_b_temporal.yaml: stage_1_warmup` (frozen Stage A, `L_occ` only
-   first — hold off on `L_tv`/`L_lidar` until Phase 6).
-4. Start with `unroll_window: 2`, 1-2 scenes only; profile VRAM before scaling to all 10.
-   **Given Phase 2's 2.84GB single-frame peak, there is likely substantial headroom for a
-   2-frame unroll — confirm with real numbers rather than assuming.**
-5. Log per-frame IoU/mIoU across a full unrolled validation clip (not just single-step loss).
+**What actually happened — substantially more extensive than originally scoped, with real
+findings at every stage.** Full blow-by-blow detail lives in `EXPERIMENT_LOG.md`'s entries
+from 2026-07-27 through 2026-07-30; this section summarizes the arc and its current status.
 
-**Config used:** `configs/stage_b_temporal.yaml: stage_1_warmup`.
+### 5.1 Real encoder wiring and Stage A training
 
-**Deliverables:** trained Stage 1 checkpoint, VRAM profile at `window=2` on 1-2 scenes,
-per-frame validation IoU/mIoU curve.
+The originally-scoped work: real (frozen) Stage A encoders wired in via
+`current_frame_encoder.py`, `pool_features.py`. Beyond the original scope: **Stage A itself
+needed real training first** (Phase 2's `G_0` was only ever a 200-iteration single-frame
+overfit) — `scripts/train_stage_a.py` was written and Stage A was trained for real,
+scaled 1→3→6→8 scenes (each a logged, deliberate step), settling on **8 trained scenes**
+with **`scene-1094`/`scene-1100` fixed as a permanent, never-trained-on held-out pair** —
+confirmed via `scripts/evaluate_stage_a_all_scenes.py` to show a real, narrowing-but-not-
+closing generalization gap as scenes scaled (gap ratio 2.43x→2.31x from 1→8 scenes),
+consistent with a genuine data-scale ceiling at this dataset's size.
+
+### 5.2 Stage B do-nothing-vs-trained methodology, and two real confounds found and fixed
+
+- **Confound 1:** the original do-nothing-vs-trained comparison used an *untrained* Stage A
+  (`init_weights()`), invalidating early results — root-caused and fixed once Stage A was
+  actually trained (5.1 above).
+- **Confound 2:** the scene-count scaling sweep initially compared runs at matched *epoch*
+  index, but clip count differs 8x across scene counts (38 vs 316 clips/epoch), so equal
+  epochs meant very unequal amounts of actual training. Fixed by switching to
+  **optimizer-step-matched evaluation** (`EVAL_EVERY_OPT_STEPS`), the methodology used for
+  every comparison from that point on.
+- With these fixed, the first fair, matched-scope test (8-scene Stage A, 8-scene Stage B)
+  showed a consistent pattern that held for the rest of Phase 5: **positive, real
+  improvement over do-nothing in-sample; negative (worse than do-nothing) on the permanent
+  held-out pair.**
+
+### 5.3 Root-cause investigation: ego-motion compensation
+
+- **`scripts/measure_gt_motion.py`** found that 60-84% of non-empty voxels change label
+  between adjacent frames — but this is dominated by **ego-vehicle motion**, not
+  independent object motion (static classes show nearly as much "change" as dynamic ones).
+- Implemented explicit ego-motion compensation (`compute_relative_transform`,
+  `apply_ego_compensated_update_rule` in `deform_heads.py`, `rotmat_to_quat` hand-verified)
+  — apply the *known* rigid transform from the dataset's own recorded poses first, so the
+  learned residual only has to capture genuine object motion.
+- **A real bug was found and fixed along the way:** the existing `pc_range` clamp (added
+  earlier for tiny learned deltas) was smearing real, multi-meter ego-shifted Gaussians onto
+  the boundary wall as visible, wrong content. Fixed by zeroing opacity for out-of-range
+  Gaussians instead of just clamping position.
+- **After the fix, a genuine (non-bug) architectural limitation was characterized, not just
+  hypothesized:** Stage B carries a *fixed* 6400-Gaussian budget forward frame-to-frame;
+  when the ego vehicle moves substantially, newly-visible content has nothing representing
+  it. `scripts/measure_ego_motion_distribution.py` confirmed this is the **majority regime**
+  at this frame rate — 44.4% of all 394 clips exceed the empirically-confirmed damage
+  threshold (median real motion 2.5m per frame gap).
+- A first fix attempt — `SpawnHead` (`spawn_head.py`), a learned mechanism replacing a
+  heuristic random-wraparound-recycling attempt that showed no benefit — gave a small, real,
+  consistent improvement over plain opacity-zeroing, but did not close the held-out gap.
+
+### 5.4 Pivot: 4DGC reference-code review, and four architecture refinements
+
+Direct reading of the actual 4DGC reference implementation (not inference) revealed 4DGC is
+fundamentally a **per-scene, test-time-optimization** method (its "spawned"/"cloned"
+Gaussians are real `nn.Parameter`s refined by gradient descent against each target frame's
+own real images) — a different, easier problem than Occ4DGS's genuine zero-shot feedforward
+setting. This reframed the debugging direction: rather than continuing to chase
+compensation/spawning fixes, the core deformation mechanism was retested **without**
+compensation (the "clean baseline"), and four concrete architecture refinements — each
+directly informed by 4DGC's actual code, not assumption — were implemented and tested one
+at a time against that clean baseline:
+
+1. **Step 1 — rotation composition order.** 4DGC composes `rotation ⊗ delta`
+   (current-first); Occ4DGS originally did `delta ⊗ rotation` (delta-first). Fixed.
+   Re-establishing the clean baseline with this fix gave the best held-out result all
+   session at the time: **+0.044** best delta (vs. do-nothing) at 8 scenes.
+2. **Step 2 — grid resolution/channel rebalance.** Moved toward 4DGC's own tradeoff
+   (finer spatial grids, fewer channels per cell: resolutions (4,8,16)→(8,16,32),
+   `grid_feat_dim` 16→4), a controlled ~2x parameter increase (not the ~8x a naive
+   resolution bump alone would cause). Best delta improved to **+0.080**.
+3. **Step 3 — PE-as-coordinate query mechanism.** Confirmed via direct code reading that
+   4DGC samples each grid level using `sin`/`cos` of frequency-scaled position *as the
+   grid-sample coordinates themselves* (not position directly, with PE as separate
+   context — this project's earlier guess at an ambiguous notation). Implemented as
+   `query_motion_grid_pe_coordinate`. Best delta improved to **+0.106**.
+4. **Step 4 — spatially-structured `ConvHyperNet`.** Replaced `MotionHyperNet`'s per-level
+   `Linear` expansion (~19M params, zero spatial inductive bias — every output cell has
+   independently-learned weights) with a shared transposed-convolutional decoder (<1M
+   params). Best delta essentially matched Step 3 (+0.100), but for the first time all
+   session, the *collapse onset was delayed* by one full checkpoint, not just the peak
+   raised — the first change to touch *when* the pattern breaks down, not just how high it
+   gets beforehand.
+
+### 5.5 Scene-scaling sweep and a critical measurement-precision finding
+
+Ran the 1/3/6/8-scene sweep on this best-yet architecture. **Result: no monotonic
+"more scenes help" pattern** (n=8 was the *worst* of the four multi-scene runs by both peak
+delta and window length) — unlike Stage A's own clean scaling result.
+
+**Critical finding, supersedes confident interpretation of everything above:** the
+do-nothing baseline — which depends only on a frozen, already-trained, deterministic Stage A
+checkpoint, involves no training at all, and should reproduce exactly — varied by **~0.036**
+across these four otherwise-identical runs. This is the **same order of magnitude** as every
+"improvement" claimed in Steps 1-4 (each was a 0.02-0.04 single-run difference). **We
+currently cannot cleanly distinguish genuine architectural improvement from run-to-run
+noise**, for any single-run comparison made this phase. The underlying architectural
+reasoning behind each step remains sound; the numerical confirmations do not yet exceed the
+measurement noise floor.
+
+### Current status: PAUSED
+
+Work paused here, by deliberate decision, pending a repeated-seed noise-floor measurement
+(not yet run) before drawing further architecture conclusions or proceeding to Phase 6.
+
+**Config used:** `configs/stage_b_temporal.yaml: stage_1_warmup` (as originally planned);
+Steps 1-4's architecture changes are code-level (`scripts/train_stage1.py`,
+`src/models/stage_b_temporal/*.py`), not yet reflected back into a stable, versioned config
+file — still living as constants at the top of `train_stage1.py`.
+
+**Deliverables:** trained Stage A checkpoint (8/10 scenes); trained Stage B temporal module
+checkpoints per scene-count (`experiments/stage_b_temporal_checkpoints/`);
+`scripts/measure_gt_motion.py`, `scripts/measure_ego_motion_distribution.py`,
+`scripts/check_ego_compensation.py` (diagnostic tooling, reusable going forward);
+`src/models/stage_b_temporal/{conv_hypernet,spawn_head}.py`; the full ego-motion-compensation
+and architecture-refinement code path in `deform_heads.py`/`grid_query.py`.
 
 **Exit checklist:**
-- [ ] VRAM profiled at `window=2`; confirmed headroom (or lack thereof) before scaling to 10
-      scenes and before attempting `window=3` in Stage 2
-- [ ] `L_occ`-only training shows the deformed-frame IoU/mIoU meaningfully above a "do-nothing"
-      baseline (Δμ=0, Δr=identity) — this is the first real evidence the temporal module is
-      learning anything, log this comparison explicitly
-- [ ] Scaled successfully to all 10 scenes at `window=2`
+- [x] VRAM profiled at `window=2`; confirmed comfortable headroom (3.2-3.9GB peak across
+      every Phase 5 configuration tried, no pressure observed) before scaling to 10 scenes.
+- [~] `L_occ`-only training shows the deformed-frame IoU/mIoU meaningfully above a
+      "do-nothing" baseline — **TRUE in-sample, consistently, across every configuration
+      tried.** **NOT YET reliably true held-out** — best-case held-out results have reached
+      positive territory (+0.044 to +0.125 depending on configuration) but always collapse
+      to a worse-than-do-nothing plateau later in training, and the measurement-noise
+      finding above means even the "positive" best-case numbers are not yet confirmed to
+      exceed run-to-run noise. This item is not closed.
+- [x] Scaled successfully to all 10 scenes at `window=2` — 8 trained + 2 permanently
+      held-out, per the new fixed split (see `README.md`'s assigned-defaults table).
 
-**Git tag:** `v0.5-phase5-stage1-trained`
+**Git tag:** none yet — `v0.5-phase5-stage1-trained` withheld until the exit checklist's
+open item is resolved (noise-floor measurement, then a clean re-assessment of Steps 1-4 and
+the scene-scaling sweep).
 
 ---
 
@@ -333,6 +453,13 @@ training curves showing (in)stability in early epochs.
    more VRAM headroom than assumed; this ablation may be cheaper to run than originally scoped.**
 3. `unroll_window = 2` vs. `3` at Stage 2.
 4. `L_tv`/`L_lidar` ablations, re-confirmed on full 10-scene eval.
+5. **New, added post-Phase 5:** the four Phase 5 Step 1-4 architecture refinements
+   (rotation-composition order, grid resolution/channel rebalance, PE-as-coordinate query,
+   conv-decoder `HyperNet`), re-evaluated under a proper repeated-seed protocol once the
+   noise-floor issue is resolved — each was only single-run-tested in Phase 5.
+6. **New, added post-Phase 5:** ego-motion compensation (with `SpawnHead`) vs. without,
+   re-evaluated the same way — Phase 5 found this net-negative in its current form, worth a
+   properly-powered re-test rather than a single-run conclusion.
 
 **Deliverables:** `experiments/phase9_ablations.md`.
 
@@ -353,11 +480,13 @@ training curves showing (in)stability in early epochs.
 **Exit checklist:**
 - [ ] Every number in the Experiments/Ablations sections traces to a specific
       `experiments/phaseN_*.md` file — no numbers written from memory
-- [ ] Limitations section explicitly states: no compensated-Gaussian/disocclusion handling,
-      no compression (future work), 10-scene scope, `N_g` reduced from paper's default,
-      Stage A reused as a dependency rather than reimplemented (a legitimate design choice,
-      but worth stating plainly rather than implying original architecture work that didn't
-      happen)
+- [ ] Limitations section explicitly states: no compensated-Gaussian/disocclusion handling
+      beyond the Phase 5 `SpawnHead` first attempt, no compression (future work), 10-scene
+      scope, `N_g` reduced from paper's default, Stage A reused as a dependency rather than
+      reimplemented (a legitimate design choice, but worth stating plainly rather than
+      implying original architecture work that didn't happen), and the fixed-Gaussian-budget
+      representational gap discovered in Phase 5 (confirmed to affect the majority of
+      real driving clips at this frame rate, not a rare edge case)
 - [ ] Draft reviewed with Prof. Chiang before submission
 
 **Git tag:** `v1.0-submission`

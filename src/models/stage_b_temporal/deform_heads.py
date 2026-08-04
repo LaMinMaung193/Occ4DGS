@@ -207,7 +207,7 @@ def apply_update_rule(
             new_opacities = torch.where(
                 out_of_range, torch.zeros_like(prev_state.opacities), prev_state.opacities
             )
-    new_rotations = quat_normalize(quat_multiply(delta_quat, prev_state.rotations))
+    new_rotations = quat_normalize(quat_multiply(prev_state.rotations, delta_quat))
     return GaussianState(
         means=new_means,
         rotations=new_rotations,

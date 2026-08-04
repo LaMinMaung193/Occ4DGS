@@ -833,3 +833,225 @@ to that earlier, better-performing baseline and treat the Gaussian-representatio
 gap as a documented, separate finding rather than an actively pursued fix.
 
 ---
+
+## [Phase 5] Run ID: 2026-07-30-4dgc-reference-code-review-scope-clarification
+
+### Context
+User provided the actual 4DGC reference implementation (github.com/zihanzheng-sjtu/4DGC:
+scripts/Motion_Grid_warmup.py, scene/Motion_Grid.py, scene/gaussian_model.py) after the
+full session's arc of fixes (delta-conditioning, ego-motion compensation, heuristic
+recycling, learned SpawnHead) failed to close the held-out generalization gap, each
+producing the same persistent curve shape (sharp early degradation, then a plateau)
+regardless of what was changed.
+
+### Finding: 4DGC solves a fundamentally different, easier problem than Occ4DGS is
+attempting
+
+Reading gaussian_model.py's training_one_frame_setup/training_one_frame_s2_setup and
+Motion_Grid_warmup.py directly (not from memory/inference, as flagged as a risk
+earlier in this project) reveals:
+
+- 4DGC's "added"/"spawned"/"cloned" Gaussians are created as real nn.Parameter
+  tensors with their OWN per-frame optimizer (self.optimizer, self.mem_optimizer),
+  refined via gradient descent AGAINST THAT SPECIFIC FRAME'S OWN REAL CAPTURED
+  IMAGES, frame by frame, at test/encode time.
+- Motion_Grid_warmup.py confirms the motion grid itself is warmed up on a SINGLE
+  scene's own point cloud before any per-frame fitting begins.
+- CONCLUSION: 4DGC is fundamentally a per-video, per-frame TEST-TIME OPTIMIZATION /
+  compression method. It has full access to every target frame's real ground truth
+  at prediction time and iteratively refines against it. It is NOT a zero-shot
+  feedforward generalization method to frames/scenes never seen or fitted.
+
+Occ4DGS's Stage B, by contrast, is attempting a single feedforward pass with FROZEN
+weights on a HELD-OUT scene, with NO gradient-based refinement against the target
+frame's own ground truth at all. This is a strictly harder, fundamentally different
+task than what 4DGC's own paper/code solves.
+
+### Implication for the entire session's debugging arc
+
+This directly explains the persistent pattern observed across every fix attempted
+(regularization, PE removal, ego-motion compensation, heuristic recycling, learned
+SpawnHead): none of them addressed the actual gap, because the project has been
+attempting to match a per-scene-TEST-TIME-FITTED method's spawning/densification
+behavior using a purely feedforward, zero-shot mechanism -- a category difference,
+not a tuning problem. No architecture change within the feedforward-only constraint
+was ever going to fully close this gap.
+
+### Separate, smaller, concrete bug found via the same code review
+
+gaussian_model.py's query_mem() composes rotation as
+self.rotation_compose(self._rotation, self._d_rot) -- i.e. CURRENT-ROTATION-FIRST
+(rotation (x) delta). Occ4DGS's apply_update_rule uses quat_multiply(delta_quat,
+prev_state.rotations) -- DELTA-FIRST (delta (x) rotation), the OPPOSITE Hamilton
+product order. For the small angles observed in this project (max 14.76 degrees
+measured across all 394 clips), this is a second-order discrepancy, not a likely
+dominant cause of the generalization gap -- but it is a confirmed, real convention
+mismatch against the reference implementation, worth correcting for exactness
+independent of the larger scope question above.
+
+### Decision / next steps (not yet resolved)
+
+1. Reframe the project's stated goal/report to explicitly acknowledge Occ4DGS
+   attempts genuine zero-shot feedforward temporal generalization -- a harder
+   setting than 4DGC's own per-frame-optimized approach -- rather than continuing
+   to treat "match 4DGC-style spawning behavior without per-frame optimization" as
+   an achievable, tuning-only target.
+2. OPEN QUESTION, not yet decided: whether to allow SOME limited per-scene
+   adaptation (e.g. a few gradient steps against frame 0's OWN data only, not the
+   target frame's ground truth) as a middle ground -- would not be "cheating" the
+   prediction task, but has not been designed or tested.
+3. Fix the rotation composition order (quat_multiply(prev_state.rotations,
+   delta_quat) instead of the current delta-first order) for exactness, independent
+   of the scope decision above -- small, mechanical, not yet applied.
+
+---
+
+## [Phase 5] Run ID: 2026-07-30-clean-baseline-reestablished-step1-applied
+
+- Reverted ego-motion compensation entirely (USE_EGO_COMPENSATION=False), applied
+  Step 1's rotation-order fix (current-first Hamilton product, matching 4DGC's
+  reference rotation_compose(self._rotation, self._d_rot)).
+- Result (n=8 scenes, step-matched, seed=42): best-ever held-out delta at n=8 this
+  session -- +0.044 at opt_step 120 (do-nothing baseline: 4.976). Curve stays near
+  parity/positive through opt_step 140, then degrades to the familiar -0.6 to -0.7
+  plateau by opt_step 1580.
+- CAVEAT: this run combines reverting compensation AND the rotation-order fix
+  together -- individual contributions not isolated. Given the small angles involved
+  (max ~15 degrees measured across all clips), the rotation fix was not expected to
+  matter much on its own; if it turns out to matter this much, worth understanding
+  why later. Most of the credit is plausibly the compensation reversion, consistent
+  with the prior retrospective finding.
+- THIS IS NOW THE REFERENCE BASELINE for testing Step 2 (grid resolution/channel
+  rebalance) and subsequent architecture changes, one at a time.
+
+---
+
+## [Phase 5] Run ID: 2026-07-30-step2-grid-rebalance
+
+- Rebalanced MotionHyperNet: resolutions (4,8,16)->(8,16,32), grid_feat_dim 16->4
+  (controlled 2x total-parameter increase, verified before running -- not the ~8x a
+  naive resolution bump alone would cause). z dimension 48->12 accordingly, DeformHeadMu/
+  DeformHeadR in_dim updated to match. Tested against the Step 1 clean baseline
+  (USE_EGO_COMPENSATION=False), single-variable change.
+- Result (n=8, step-matched, seed=42): best held-out delta improved +0.044 -> +0.080
+  (nearly 2x), achieved at opt_step 80. The near-zero/positive window (opt_step
+  40-120) is both slightly wider and consistently stronger than Step 1's baseline
+  across it (deltas +0.023/+0.080/+0.020/+0.054 vs Step 1's +0.008/-0.021/-0.055).
+- CRITICAL: the underlying curve SHAPE is unchanged -- sharp decline still begins
+  around opt_step 140-160, settling into the same -0.6 to -0.78 plateau by opt_step
+  1580 (final: -0.766 here vs -0.707 for Step 1, essentially identical). Grid
+  rebalance raised the ceiling of the "good" early phase but did not extend its
+  duration or prevent the later collapse.
+- Decision: keep this change (genuine, single-variable improvement, no reason to
+  revert). Proceed to Step 3 (PE-as-coordinate query mechanism) on top of this new
+  baseline (+0.080 at opt_step 80).
+
+---
+
+## [Phase 5] Run ID: 2026-07-30-step3-pe-coordinate-query
+
+- Implemented 4DGC's actual query mechanism (confirmed via direct code reading, not
+  inference): query_motion_grid_pe_coordinate samples each grid level TWICE, using
+  sin(2^l*pi*norm_means) and cos(2^l*pi*norm_means) AS the grid_sample coordinates
+  themselves (not position directly, PE not concatenated as separate context --
+  this project's earlier guess at an ambiguous notation, kept as query_motion_grid's
+  unchanged default for backward compatibility). z dimension doubled 12->24
+  accordingly (2 samples x 3 levels x 4 channels), DeformHeadMu/DeformHeadR in_dim
+  updated to match. Tested against Step 2's baseline, single-variable change.
+- Result (n=8, step-matched, seed=42): best held-out delta improved +0.080 -> +0.106
+  (now 2.4x Step 1's original +0.044). The near-zero/positive window is genuinely
+  more robust this time -- 5 of 7 checkpoints from opt_step 40-140 are positive or
+  near-zero (+0.081/+0.042/+0.020/+0.088/+0.106/+0.015), not just an isolated peak.
+- CRITICAL, UNCHANGED: collapse still begins on schedule at opt_step 160, settling
+  into essentially the same final plateau (-0.625, vs Step 2's -0.766 and Step 1's
+  -0.707 -- all in the -0.6 to -0.78 range). Three consecutive architecture
+  improvements have each raised the peak and slightly extended the good window, but
+  NONE has touched whatever triggers the collapse after ~150 steps.
+- Decision: keep this change. Proceed to Step 4 (spatially-resolved grid prediction,
+  the prime suspect for the collapse itself) on top of this new baseline (+0.106 at
+  opt_step 120).
+
+---
+
+## [Phase 5] Run ID: 2026-07-30-step4-conv-hypernet
+
+- Replaced MotionHyperNet's per-level Linear expansion (~19M params, zero spatial
+  inductive bias) with ConvHyperNet, a shared transposed-convolutional decoder
+  (<1M params, spatially-structured, top-down refinement across resolution levels).
+  Tested against Step 3's baseline, single-variable change (parameter count and
+  inductive bias both change together -- not separated, noted as a limitation).
+- Result (n=8, step-matched, seed=42): best held-out delta +0.100 at opt_step 80,
+  essentially matching Step 3's +0.106 (no peak improvement). BUT the good window
+  shifted meaningfully later: positive/near-zero from opt_step 60-160 (6 checkpoints),
+  vs Step 3's opt_step 40-140 -- collapse onset delayed by one full checkpoint
+  (20 optimizer steps), the FIRST change all session to shift WHEN the collapse
+  begins rather than only how high the peak reaches beforehand.
+- Final plateau unchanged in magnitude: -0.665, within the same -0.6 to -0.78 range
+  every prior version has landed in.
+- CONCLUSION: four architecture changes in a row (grid rebalance, PE-coordinate
+  query, conv decoder) have each produced similar-sized, modest, real improvements,
+  and NONE has broken the fundamental collapse-then-plateau shape. If the HyperNet
+  spatial bottleneck (Step 4's specific target) were the dominant cause, expected a
+  much larger effect than a one-checkpoint delay. Increasingly points to the
+  data-scale ceiling (shared with Stage A, never yet cleanly isolated for Stage B
+  specifically via a clean scene-scaling sweep) as the dominant remaining factor.
+- Decision (pending user input): consider running the Stage-B-specific scene-scaling
+  sweep now, on this best-yet architecture (Steps 1-4 combined), to directly test
+  the data-scale hypothesis rather than inferring it by elimination.
+
+---
+
+## [Phase 5] Run ID: 2026-07-30-scene-scaling-sweep-and-critical-noise-floor-finding
+
+### Scene-scaling sweep (n=1, 3, 6, 8), architecture = Steps 1-4 combined
+
+| Scenes | Best held-out delta | At opt_step | Positive-window length |
+|---|---|---|---|
+| 1 | +0.091 | 60 | 3 checkpoints (opt_step 40-80) |
+| 3 | +0.125 (best all-time this session) | 140 | 6 checkpoints (60-160) |
+| 6 | +0.105 | 80 | 7 checkpoints (60-180, longest window observed) |
+| 8 | +0.068 | 120 | 5 checkpoints (60-140) |
+
+RESULT: no monotonic "more scenes -> better generalization" pattern, unlike Stage A's
+clean scaling result. n=8 is the WORST of the four multi-scene runs by both peak delta
+and window length; n=3 and n=6 both outperform n=8. This directly contradicts the
+assumption (carried over from Stage A's confirmed scaling behavior) that more scenes
+would straightforwardly help Stage B's learned components too.
+
+### CRITICAL FINDING, supersedes confident interpretation of the above and of every
+architecture comparison this session
+
+The "Held-out do-nothing baseline" value -- which depends ONLY on the frozen,
+already-trained Stage A checkpoint evaluated on the same 2 held-out scenes, involves
+NO training, and should be exactly reproducible run to run -- varied across these four
+runs: 4.974, 4.993, 5.010, 5.001 (range 0.036).
+
+IMPLICATION: there is unexplained non-determinism somewhere in the pipeline (likely
+GPU-level -- non-deterministic cuDNN kernels, or some training-mode-gated operation in
+Stage A's forward pass not fully neutralized under .eval()). This noise (~0.036 on a
+completely untrained, deterministic-in-principle quantity) is THE SAME ORDER OF
+MAGNITUDE as the differences we have been attributing to architecture improvements all
+session: Step 1->2->3->4's best-delta progression was +0.044 -> +0.080 -> +0.106 ->
++0.100, i.e. consecutive differences of 0.02-0.04.
+
+CONCLUSION: we currently CANNOT cleanly distinguish genuine architectural improvement
+from run-to-run noise, for ANY single-run comparison made this session, including:
+  - Steps 1-4's individual claimed improvements (each was a single run vs single run)
+  - This scene-scaling sweep's n=1/3/6/8 ranking
+
+This does not mean Steps 1-4 were wrong or the sweep is meaningless -- the underlying
+architectural reasoning for each (rotation order, spatial resolution, PE-as-coordinate,
+spatial inductive bias in the decoder) remains sound and independently well-motivated.
+It means the NUMERICAL comparisons used to confirm each one exceeded our actual
+measurement precision, and every one of those comparisons needs to be treated as
+provisional until repeated-seed noise floor is established.
+
+### Decision: PAUSED here, logged, no further runs until noise floor is measured
+
+Next step (not yet started): repeat at least one configuration (recommend n=8, our
+main reference point) 2-3 times with different seeds, to measure the true run-to-run
+variance in both the do-nothing baseline and the best-achieved held-out delta. Only
+once that noise floor is known can Steps 1-4's improvements and the scene-scaling
+ranking be properly assessed as signal vs. noise.
+
+---

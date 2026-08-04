@@ -44,7 +44,9 @@ from src.models.stage_b_temporal import (  # noqa: E402
     GaussianState,
     ReferenceBuffer,
     MotionHyperNet,
+    ConvHyperNet,
     query_motion_grid,
+    query_motion_grid_pe_coordinate,
     DeformHeadMu,
     DeformHeadR,
     apply_update_rule,
@@ -87,8 +89,18 @@ WEIGHT_DECAY = 0.05
 DROPOUT_P = 0.2
 MOTION_PENALTY_WEIGHT = 0.01
 
-USE_SPAWN_HEAD = True
-SPAWN_GRID_FEAT_DIM = 48
+# Toggle for isolating architecture changes against the CLEAN, pre-compensation
+# baseline (EXPERIMENT_LOG.md 2026-07-30 retrospective): every fix layered on top of
+# ego-motion compensation this session (opacity fix, recycling, SpawnHead) has left
+# the best-ever held-out result WORSE than delta-conditioning alone, before
+# compensation existed. Set False to test new architecture ideas (grid rebalance, PE
+# query mechanism, spatially-resolved grid prediction) against that clean baseline,
+# one change at a time, before deciding whether/how to recombine with compensation.
+USE_EGO_COMPENSATION = False
+
+USE_SPAWN_HEAD = True and USE_EGO_COMPENSATION
+SPAWN_GRID_FEAT_DIM = 24  # Step 3: query_motion_grid_pe_coordinate doubles z's dim
+                          # (sin+cos sample per level), 3 levels * 2 * 4 channels = 24
 SPAWN_POOLED_DIM = 128
 SPAWN_MAX_OFFSET = 2.0
 
@@ -121,9 +133,17 @@ def build_stage_a(cfg):
 
 def build_temporal_module():
     pool = PoolFeatures(img_channels=128, dpt_channels=112, num_levels=4, in_dim=128).cuda()
-    hypernet = MotionHyperNet(in_dim=128, grid_feat_dim=16, resolutions=(4, 8, 16)).cuda()
-    deform_mu = DeformHeadMu(in_dim=3 * 16, hidden_dim=128).cuda()
-    deform_r = DeformHeadR(in_dim=3 * 16, hidden_dim=128, max_angle_rad=0.3).cuda()
+    # Step 4 (EXPERIMENT_LOG.md): ConvHyperNet replaces MotionHyperNet's per-level
+    # Linear expansion (zero spatial inductive bias, ~19M params) with a shared
+    # transposed-convolutional decoder (spatially-structured, <1M params). Same
+    # interface (pooled vector in, list of grids out), drop-in replaceable.
+    hypernet = ConvHyperNet(in_dim=128, grid_feat_dim=4, resolutions=(8, 16, 32),
+                             seed_res=4, seed_channels=64).cuda()
+    # Step 3 (EXPERIMENT_LOG.md, 4DGC reference review): in_dim doubled 12->24 for
+    # query_motion_grid_pe_coordinate's two samples (sin-coord, cos-coord) per level,
+    # replacing query_motion_grid's single position-based sample per level.
+    deform_mu = DeformHeadMu(in_dim=3 * 2 * 4, hidden_dim=128).cuda()
+    deform_r = DeformHeadR(in_dim=3 * 2 * 4, hidden_dim=128, max_angle_rad=0.3).cuda()
     feature_dropout = nn.Dropout(p=DROPOUT_P).cuda()
     z_dropout = nn.Dropout(p=DROPOUT_P).cuda()
     spawn_head = None
@@ -169,9 +189,15 @@ def deform_one_step(g_prev, encoder, pool, hypernet, deform_mu, deform_r,
 
     grids = hypernet(pooled_delta)
     means_flat = g_prev.means.squeeze(0) if g_prev.means.dim() == 3 else g_prev.means
-    z = z_dropout(query_motion_grid(means_flat, grids, PC_RANGE, include_pe=False))
+    z = z_dropout(query_motion_grid_pe_coordinate(means_flat, grids, PC_RANGE))
     delta_mu = deform_mu(z)
     delta_r = deform_r(z)
+
+    if not USE_EGO_COMPENSATION:
+        g_t = apply_update_rule(g_prev, delta_mu, delta_r, pc_range=PC_RANGE)
+        if return_deltas:
+            return g_t, delta_mu, delta_r
+        return g_t
 
     pose_prev = cuda_prev["metas"]["lidar2global"][0]
     pose_curr = cuda_curr["metas"]["lidar2global"][0]
@@ -182,7 +208,7 @@ def deform_one_step(g_prev, encoder, pool, hypernet, deform_mu, deform_r,
         wrapped_base, _out_of_range = compute_spawn_candidate_positions(
             means_flat, delta_mu, relative_transform, PC_RANGE
         )
-        z_candidate = query_motion_grid(wrapped_base, grids, PC_RANGE, include_pe=False)
+        z_candidate = query_motion_grid_pe_coordinate(wrapped_base, grids, PC_RANGE)
         spawn_offset, spawn_opacity, spawn_semantics = spawn_head(z_candidate, pooled_delta)
 
     g_t = apply_ego_compensated_update_rule(

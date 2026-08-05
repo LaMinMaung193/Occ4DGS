@@ -46,7 +46,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 _cwd = os.getcwd()
-from run_stage_a_frame0 import build_pipeline, to_batch_of_one, GF3D_ROOT  # noqa: E402
+from src.datasets.gf3d_pipeline import build_pipeline, to_batch_of_one, GF3D_ROOT  # noqa: E402
 os.chdir(_cwd)
 
 import torch  # noqa: E402

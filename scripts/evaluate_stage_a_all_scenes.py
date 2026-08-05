@@ -33,7 +33,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import torch  # noqa: E402
 from mmengine import Config  # noqa: E402
 
-from train_stage1 import (  # noqa: E402 -- reusing exact helper functions
+from src.training.stage_b_engine import (  # noqa: E402 -- reusing exact helper functions
     build_stage_a,
     get_real_g0,
     splat_and_loss,
@@ -51,7 +51,7 @@ from src.datasets.occ4dgs_dataset import Occ4DGSDataset  # noqa: E402
 
 import json  # noqa: E402
 
-from run_stage_a_frame0 import build_pipeline, to_batch_of_one  # noqa: E402
+from src.datasets.gf3d_pipeline import build_pipeline, to_batch_of_one  # noqa: E402
 
 
 ALL_SCENES = [

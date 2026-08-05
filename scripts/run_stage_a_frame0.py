@@ -5,84 +5,32 @@ using our own Occ3D-mini dataset instead of their SurroundOcc pkl pipeline.
 Skips custom_collate_fn_temporal deliberately for this first run -- batch_size=1
 avoids the variable-LiDAR-point-count stacking question entirely (see
 EXPERIMENT_LOG.md Phase 2). Revisit collate_fn once multi-sample batching is needed.
+
+Phase 5 repo-layout cleanup: build_pipeline/to_batch_of_one/REPO_ROOT/GF3D_ROOT moved
+to src/datasets/gf3d_pipeline.py (they were being imported by 7 other scripts --
+genuinely shared library code, not specific to this file's own Phase 2 demo). This
+file now only keeps its own Phase 2 demo logic.
 """
-import os, sys, json
-import torch
+import os
+import sys
 
-REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))  # compute FIRST, before any chdir
-GF3D_ROOT = os.path.expanduser("~/Documents/min/GaussianFormer3D")
-sys.path.insert(0, GF3D_ROOT)
-sys.path.insert(0, REPO_ROOT)
+# Bootstrap: every entry-point script under scripts/ needs this one line before it can
+# `import src...` at all, since this repo isn't pip-installed -- matches the existing
+# pattern in scripts/train_stage1.py etc. Must happen BEFORE the src.* import below.
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-os.chdir(GF3D_ROOT)  # safe now -- REPO_ROOT already captured as an absolute path above
+import json  # noqa: E402
+import torch  # noqa: E402
 
+from src.datasets.gf3d_pipeline import REPO_ROOT, GF3D_ROOT, build_pipeline, to_batch_of_one  # noqa: E402
 
-from mmengine import Config
-from mmseg.models import build_segmentor
+from mmengine import Config  # noqa: E402
+from mmseg.models import build_segmentor  # noqa: E402
 
-import model  # <-- ADD THIS: triggers all @MODELS.register_module()/@SEGMENTORS.register_module() decorators
+import model  # noqa: E402 -- triggers all @MODELS.register_module()/@SEGMENTORS.register_module() decorators
 
-from src.datasets.nuscenes_mini import load_nuscenes
-from src.datasets.occ4dgs_dataset import Occ4DGSDataset
-
-
-
-def build_pipeline():
-    """
-    Pipeline transforms reused directly from GaussianFormer3D, matching
-    config/_base_/surroundocc_pcd_dfa3d.py's train_pipeline structure but with
-    LoadOccupancySurroundOcc swapped for LoadOccupancyOcc3d.
-    """
-    from dataset.transform_3d import (
-        LoadPointFromFileLiDAR, LoadPointsFromMultiSweepsLiDAR,
-        LoadMultiViewImageFromFiles, LoadOccupancyOcc3d,
-        LoadMultiViewDepthFromFiles, NormalizeMultiviewImage,
-        PadMultiViewImage, NuScenesAdaptor,
-    )
-    img_norm_cfg = dict(mean=[123.675, 116.28, 103.53], std=[58.395, 57.12, 57.375], to_rgb=True)
-    occ4dgs_data_root = os.path.join(REPO_ROOT, "data", "occ3d_gts")   # <-- FIXED: was just "data"
-    return [
-        LoadPointFromFileLiDAR(coord_type="LIDAR", load_dim=5, use_dim=5),
-        LoadPointsFromMultiSweepsLiDAR(sweeps_num=10, load_dim=5, use_dim=5,
-                                        pad_empty_sweeps=True, remove_close=True),
-        LoadMultiViewImageFromFiles(to_float32=True),
-        LoadOccupancyOcc3d(occ_path=occ4dgs_data_root, semantic=True, use_ego=True,
-                            use_occ3d_mask=True, pc_range=[-40.0, -40.0, -1.0, 40.0, 40.0, 5.4],
-                            use_lidar=True, use_mask_training=False),
-        LoadMultiViewDepthFromFiles(is_to_depth_map=True, map_size=None),
-        NormalizeMultiviewImage(**img_norm_cfg),
-        PadMultiViewImage(size_divisor=32),
-        NuScenesAdaptor(use_ego=False, num_cams=6),
-    ]
-
-
-def to_batch_of_one(sample_dict):
-    """Wrap a single Occ4DGSDataset __getitem__ output into batch-of-1 tensors,
-    bypassing custom_collate_fn_temporal for this first single-sample run."""
-    imgs = torch.stack([torch.from_numpy(im).permute(2, 0, 1).float() for im in sample_dict["img"]])
-    imgs = imgs.unsqueeze(0)  # (1, N, C, H, W)
-
-    metas = {
-        "projection_mat": torch.from_numpy(sample_dict["projection_mat"]).unsqueeze(0).float(),
-        "image_wh": torch.from_numpy(sample_dict["image_wh"]).unsqueeze(0).float(),
-        "occ_xyz": torch.from_numpy(sample_dict["occ_xyz"]).unsqueeze(0).float(),
-        "occ_label": torch.from_numpy(sample_dict["occ_label"]).unsqueeze(0).long(),
-        "occ_cam_mask": torch.from_numpy(sample_dict["occ_cam_mask"]).unsqueeze(0).bool(),
-    }
-    if "ego2global" in sample_dict:
-        metas["ego2global"] = torch.from_numpy(sample_dict["ego2global"]).unsqueeze(0).float()
-    if "lidar2global" in sample_dict:
-        metas["lidar2global"] = torch.from_numpy(sample_dict["lidar2global"]).unsqueeze(0).float()
-
-    points = [torch.from_numpy(sample_dict["points"].tensor.numpy()
-                                if hasattr(sample_dict["points"], "tensor")
-                                else sample_dict["points"]).float()]
-
-    dpt = None
-    if "dpt" in sample_dict:
-        dpt = torch.stack([torch.from_numpy(d).float() for d in sample_dict["dpt"]]).unsqueeze(0).unsqueeze(2)
-
-    return dict(imgs=imgs, metas=metas, points=points, dpt=dpt)
+from src.datasets.nuscenes_mini import load_nuscenes  # noqa: E402
+from src.datasets.occ4dgs_dataset import Occ4DGSDataset  # noqa: E402
 
 
 def main():
@@ -123,7 +71,7 @@ def main():
         batch[k] = [t.cuda() for t in batch[k]] if isinstance(batch[k], list) else batch[k].cuda()
     batch["metas"]["projection_mat"] = batch["metas"]["projection_mat"].cuda()
     batch["metas"]["image_wh"] = batch["metas"]["image_wh"].cuda()
-    batch["metas"]["occ_xyz"] = batch["metas"]["occ_xyz"].cuda()  # <-- ADD THIS TOO
+    batch["metas"]["occ_xyz"] = batch["metas"]["occ_xyz"].cuda()
     batch["metas"]["occ_label"] = batch["metas"]["occ_label"].cuda()
     batch["metas"]["occ_cam_mask"] = batch["metas"]["occ_cam_mask"].cuda()
     if batch["dpt"] is not None:

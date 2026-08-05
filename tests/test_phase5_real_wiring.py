@@ -2,61 +2,60 @@
 tests/test_phase5_real_wiring.py
 
 Phase 5 wiring validation: confirms the full chain -- real Stage A G_0, real frame-1
-encoder features, PoolFeatures -> MotionHyperNet -> grid_query -> DeformHeadMu/R ->
-apply_update_rule -> ReferenceBuffer -> GaussianHead splat -- actually runs end to end
-on one real 2-frame clip, before any training loop is written.
+encoder features, PoolFeatures -> HyperNet -> grid_query -> DeformHeadMu/R ->
+update rule -> ReferenceBuffer -> GaussianHead splat -- actually runs end to end
+on one real 2-frame clip, before committing to a full training run.
 
-This is NOT the Stage 1 warmup training script (that comes after this passes, per
-roadmap Phase 5 step 3) -- no optimizer step happens here. This test only confirms:
+This is NOT the Stage 1 warmup training script -- no optimizer step happens here.
+This test only confirms:
   1. Real G_0 (from an actual Stage A forward pass) has the expected shape/fields.
   2. Frame 1's deformed G_1 is provably distinct from G_0 (buffer recursion holds on
      real data, not just the Phase 4 toy sequence).
   3. GaussianHead is callable standalone on G_1 with frame 1's own GT metas, producing
-     pred_occ of the expected shape (confirms EXPERIMENT_LOG.md's Phase 5 bridge finding
-     #3 -- standalone splat callability -- against real tensors, not just source reading).
-  4. Peak VRAM at unroll_window=2, one scene, one clip -- roadmap Phase 5 step 4's exit
-     checklist requirement to profile before scaling to 10 scenes / window=3.
+     pred_occ of the expected shape.
+  4. Peak VRAM at unroll_window=2, one scene, one clip.
+
+Phase 5 repo-layout cleanup (EXPERIMENT_LOG.md): rewritten to call the REAL, current
+pipeline functions from src.training.stage_b_engine (build_stage_a, build_temporal_module,
+get_real_g0, deform_one_step) instead of hand-reconstructing each piece locally. The
+original version hand-built MotionHyperNet(resolutions=(4,8,16)) and a DeformHeadMu
+in_dim formula that matched NEITHER the pre- nor post-Steps-1-4 architecture by the time
+it was rediscovered -- a hand-copied snapshot silently drifting out of sync with the
+real pipeline is exactly the failure mode this rewrite removes. This version will always
+exercise whichever architecture is currently live, automatically, including after any
+future change (e.g. the planned Step 5 redesign).
 
 Must be run from the repo root, in the gf3d conda env, e.g.:
-    python tests/test_phase5_real_wiring.py
+    PYTHONNOUSERSITE=1 python tests/test_phase5_real_wiring.py
 """
 import os
 import sys
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "scripts"))
-
-_cwd = os.getcwd()
-from run_stage_a_frame0 import build_pipeline, to_batch_of_one, GF3D_ROOT  # noqa: E402
-os.chdir(_cwd)  # undo run_stage_a_frame0's module-level os.chdir(GF3D_ROOT) side effect
 
 import torch  # noqa: E402
 from mmengine import Config  # noqa: E402
-from mmseg.models import build_segmentor  # noqa: E402
 
-sys.path.insert(0, GF3D_ROOT)
-import model  # noqa: E402,F401  -- triggers @MODELS.register_module() decorators
-
-from src.datasets.nuscenes_mini import load_nuscenes  # noqa: E402
 from src.datasets.occ4dgs_dataset import Occ4DGSDataset  # noqa: E402
 from src.datasets.occ4dgs_clip_dataset import Occ4DGSClipDataset  # noqa: E402
-from src.models.stage_b_temporal import (  # noqa: E402
-    GaussianState,
+from src.datasets.nuscenes_mini import load_nuscenes  # noqa: E402
+
+from src.training.stage_b_engine import (  # noqa: E402
+    REPO_ROOT,
+    GF3D_ROOT,
+    PC_RANGE,
+    build_pipeline,
+    to_batch_of_one,
+    to_cuda,
+    build_stage_a,
+    build_temporal_module,
+    get_real_g0,
+    deform_one_step,
+    CurrentFrameEncoder,
     ReferenceBuffer,
-    MotionHyperNet,
-    query_motion_grid,
-    DeformHeadMu,
-    DeformHeadR,
-    apply_update_rule,
 )
-from src.models.stage_b_temporal.current_frame_encoder import CurrentFrameEncoder  # noqa: E402
-from src.models.stage_b_temporal.pool_features import PoolFeatures  # noqa: E402
 
 import json  # noqa: E402
-
-
-REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-PC_RANGE = [-40.0, -40.0, -1.0, 40.0, 40.0, 5.4]  # Occ3D range, confirmed Phase 0
 
 
 def main():
@@ -76,40 +75,27 @@ def main():
         if base_dataset.samples[clip[0]][0] == "scene-0061"
     )
     frame0_dict, frame1_dict = clip_dataset[scene0061_clip_idx]
-    batch0 = to_batch_of_one(frame0_dict)
-    batch1 = to_batch_of_one(frame1_dict)
+    cuda0 = to_cuda(to_batch_of_one(frame0_dict))
+    cuda1 = to_cuda(to_batch_of_one(frame1_dict))
 
-    # ---- 2. Build the full segmentor, load pretrained weights, freeze encoders ----
+    # ---- 2. Build the real Stage A segmentor + real, CURRENT temporal module ----
+    # Both come straight from stage_b_engine -- whatever architecture is live right
+    # now (post Steps 1-4, and automatically post any future change too) is exactly
+    # what this test exercises. build_stage_a loads the real trained checkpoint if
+    # present, falling back to init_weights() otherwise -- matches every real script.
     cfg = Config.fromfile(os.path.join(GF3D_ROOT, "config", "occ4dgs_mini_occ3d_gs6400.py"))
-    segmentor = build_segmentor(cfg.model)
-    segmentor.init_weights()
-    segmentor = segmentor.cuda().eval()
-    for submodule in (segmentor.img_backbone, segmentor.img_neck, segmentor.pts_dpt_head):
-        for p in submodule.parameters():
-            p.requires_grad_(False)
-
-    def to_cuda(batch):
-        out = {"imgs": batch["imgs"].cuda(), "points": [t.cuda() for t in batch["points"]]}
-        out["metas"] = {k: v.cuda() for k, v in batch["metas"].items()}
-        out["dpt"] = batch["dpt"].cuda() if batch["dpt"] is not None else None
-        return out
-
-    cuda0 = to_cuda(batch0)
-    cuda1 = to_cuda(batch1)
+    segmentor = build_stage_a(cfg)
+    encoder = CurrentFrameEncoder(segmentor)
+    pool, hypernet, deform_mu, deform_r, feature_dropout, z_dropout, spawn_head = build_temporal_module()
+    for m in (pool, hypernet, deform_mu, deform_r, feature_dropout, z_dropout):
+        m.eval()
+    if spawn_head is not None:
+        spawn_head.eval()
 
     torch.cuda.reset_peak_memory_stats()
 
     # ---- 3. Get a REAL G_0 by running Stage A's full forward on frame 0 ----
-    with torch.no_grad():
-        representation0 = segmentor(
-            imgs=cuda0["imgs"], metas=cuda0["metas"], points=cuda0["points"],
-            dpt=cuda0["dpt"], rep_only=True,
-        )
-    g0_dict = representation0[-1]["gaussian"]
-    g0 = GaussianState(
-        means=g0_dict.means, rotations=g0_dict.rotations,
-        scales=g0_dict.scales, opacities=g0_dict.opacities, semantics=g0_dict.semantics,
-    )
+    g0, g0_dict = get_real_g0(segmentor, cuda0)
     n_g = g0.means.shape[1] if g0.means.dim() == 3 else g0.means.shape[0]
     print(f"[1/4] Real G_0 obtained: means shape {tuple(g0.means.shape)} (N_g={n_g})")
     assert n_g == 6400, f"expected N_g=6400 per config, got {n_g}"
@@ -117,31 +103,15 @@ def main():
 
     buffer = ReferenceBuffer(g0)
 
-    # ---- 4. Frame 1: real encoder features -> pool -> hypernet -> deform -> G_1 ----
-    encoder = CurrentFrameEncoder(segmentor)
+    # ---- 4. Frame 1: deform_one_step -- the EXACT function every real training run
+    #          and every evaluation script uses, not a hand-reconstructed copy ----
     with torch.no_grad():
-        ms_img_feats, _dpt_dist, out_dpt_multiscale = encoder.encode(
-            cuda1["imgs"], cuda1["dpt"], cuda1["metas"]
-        )
-
-    img_channels = ms_img_feats[0].shape[2]
-    dpt_channels = out_dpt_multiscale[0].shape[2]
-    pool = PoolFeatures(img_channels=img_channels, dpt_channels=dpt_channels,
-                         num_levels=len(ms_img_feats), in_dim=128).cuda()
-    hypernet = MotionHyperNet(in_dim=128, grid_feat_dim=16, resolutions=(4, 8, 16)).cuda()
-    deform_mu = DeformHeadMu(in_dim=3 * (16 + 6), hidden_dim=128).cuda()
-    deform_r = DeformHeadR(in_dim=3 * (16 + 6), hidden_dim=128, max_angle_rad=0.3).cuda()
-
-    with torch.no_grad():
-        pooled = pool(ms_img_feats, out_dpt_multiscale)
-        grids = hypernet(pooled)
-
         g_prev = buffer.read()
-        means_flat = g_prev.means.squeeze(0) if g_prev.means.dim() == 3 else g_prev.means
-        z = query_motion_grid(means_flat, grids, PC_RANGE)
-        delta_mu = deform_mu(z)
-        delta_r = deform_r(z)
-        g1 = apply_update_rule(g_prev, delta_mu, delta_r, pc_range=PC_RANGE)
+        g1, delta_mu, delta_r = deform_one_step(
+            g_prev, encoder, pool, hypernet, deform_mu, deform_r,
+            feature_dropout, z_dropout, cuda0, cuda1,
+            spawn_head=spawn_head, return_deltas=True,
+        )
         buffer.write(g1)
 
     means_prev = g_prev.means

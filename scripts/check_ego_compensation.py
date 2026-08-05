@@ -19,7 +19,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "scripts"))
 
-import train_stage1 as ts1  # noqa: E402
+import src.training.stage_b_engine as ts1  # noqa: E402
 
 from mmengine import Config  # noqa: E402
 from src.datasets.nuscenes_mini import load_nuscenes  # noqa: E402

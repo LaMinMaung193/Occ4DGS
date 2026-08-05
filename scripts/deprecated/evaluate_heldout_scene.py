@@ -24,7 +24,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import torch  # noqa: E402
 from mmengine import Config  # noqa: E402
 
-from train_stage1 import (  # noqa: E402 -- reusing exact helper functions, not duplicating logic
+from src.training.stage_b_engine import (  # noqa: E402 -- reusing exact helper functions, not duplicating logic
     build_stage_a,
     build_temporal_module,
     get_real_g0,
@@ -46,7 +46,7 @@ from src.datasets.occ4dgs_clip_dataset import Occ4DGSClipDataset  # noqa: E402
 
 import json  # noqa: E402
 
-from run_stage_a_frame0 import build_pipeline, to_batch_of_one  # noqa: E402
+from src.datasets.gf3d_pipeline import build_pipeline, to_batch_of_one  # noqa: E402
 
 
 HELDOUT_SCENES = ["scene-1094", "scene-1100"]  # the permanent held-out validation
@@ -76,7 +76,7 @@ def main():
     print(f"Loaded trained temporal module (trained on {temporal_ckpt['trained_on_scenes']}, "
           f"{temporal_ckpt['n_epochs']} epochs): {temporal_ckpt_path}")
 
-    from train_stage1 import CurrentFrameEncoder  # noqa: E402 -- avoid duplicate import at top
+    from src.training.stage_b_engine import CurrentFrameEncoder  # noqa: E402 -- avoid duplicate import at top
     encoder = CurrentFrameEncoder(segmentor)
     loss_func = OPENOCC_LOSS.build(cfg.loss).cuda()
 

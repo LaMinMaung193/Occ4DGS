@@ -11,7 +11,7 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from run_stage_a_frame0 import GF3D_ROOT, REPO_ROOT, build_pipeline, to_batch_of_one
+from src.datasets.gf3d_pipeline import GF3D_ROOT, REPO_ROOT, build_pipeline, to_batch_of_one
 
 from mmengine import Config
 from mmseg.models import build_segmentor

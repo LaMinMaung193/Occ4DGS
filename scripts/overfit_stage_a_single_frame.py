@@ -25,7 +25,7 @@ from loss import OPENOCC_LOSS
 
 from src.datasets.nuscenes_mini import load_nuscenes
 from src.datasets.occ4dgs_dataset import Occ4DGSDataset
-from run_stage_a_frame0 import build_pipeline, to_batch_of_one
+from src.datasets.gf3d_pipeline import build_pipeline, to_batch_of_one
 
 def _first_shape(x):
     if isinstance(x, (list, tuple)):

@@ -76,9 +76,15 @@ SPAWN_POOLED_DIM = 128
 SPAWN_MAX_OFFSET = 2.0
 
 # Step 5 toggle: True = new spatial-panorama pipeline (pieces 1-3), False = exact
-# Steps 1-4 baseline (flat-vector PoolFeatures + ConvHyperNet). Flip to False to
-# re-run the known-good baseline for a Gate 3/4 comparison.
-USE_SPATIAL_STEP5 = True
+# Steps 1-4 baseline (flat-vector PoolFeatures + ConvHyperNet).
+# REVERTED TO False (EXPERIMENT_LOG.md 2026-08-06): Gate 3 showed the spatial pipeline's
+# peak was statistically inconclusive vs. the noise floor, but its TROUGH collapsed
+# meaningfully further than every prior version (final delta -1.055 vs. -0.6 to -0.8
+# range for Steps 1-4) -- a real, unresolved regression, not just noise. Reverting to
+# the known-good Steps 1-4 baseline as the active default while that finding is
+# investigated. Step 5's code is fully intact and available -- flip back to True to
+# resume that investigation; nothing was deleted.
+USE_SPATIAL_STEP5 = False
 SPATIAL_POOL_OUT_CHANNELS = 32
 SPATIAL_PANORAMA_BINS = 24
 SPATIAL_K_SUBSAMPLES = 4

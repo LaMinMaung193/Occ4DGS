@@ -1278,3 +1278,39 @@ more to memorize about "which scene is this" rather than "how does this scene mo
 ### Decision: logged, not yet escalated to Gate 4; trough finding to be investigated
 before deciding whether to continue with the spatial-panorama approach as-is, adjust
 it, or revert to Steps 1-4's baseline as the working architecture.
+
+---
+
+## [Phase 5] Run ID: 2026-08-06-step5-reverted-to-baseline
+
+### Decision: reverted USE_SPATIAL_STEP5 to False, Steps 1-4 restored as active default
+
+Following the Gate 3 finding (peak inconclusive vs. noise floor; trough collapsed
+meaningfully further than every prior version, -1.055 vs. the -0.6 to -0.8 range
+Steps 1-4 all plateaued in) -- reverted the toggle rather than continuing to
+investigate on top of an active, regressed configuration.
+
+Verified the revert actually restores old behavior, not just flips a flag blindly:
+  - tests/test_stage_b_skeleton.py: all 3 Phase 4 checks still pass.
+  - tests/test_phase5_real_wiring.py: all 4 checks pass on real data. Notably, G_1's
+    mean-abs-delta-from-G_0 (0.232) is back in the same order of magnitude as the
+    original Step 4-era runs, vs. the smaller 0.071 seen with the spatial pipeline
+    active -- consistent, independent evidence this genuinely re-exercises the old
+    ConvHyperNet path, not just a flag that happens not to error.
+
+Step 5's code (SpatialPoolFeatures, SpatialConvHyperNet, both-frames temporal
+conditioning, both test files) is fully intact, committed, and available -- nothing
+deleted. USE_SPATIAL_STEP5=True resumes that investigation whenever it's picked back
+up; USE_SPATIAL_STEP5=False (current state) is the known-good Steps 1-4 baseline.
+
+### Current status
+
+Active configuration: Steps 1-4 (rotation-order fix, grid resolution/channel
+rebalance, PE-as-coordinate query, ConvHyperNet), no ego-motion compensation,
+no SpawnHead, no spatial panorama. This matches exactly what was running before
+Step 5 began (2026-08-06-step0-noise-floor-localized-and-protocol-adopted entry and
+earlier). The open question motivating Step 5 -- pooling destroys spatial
+information, camera overlaps need handling, temporal conditioning is weak -- remains
+unresolved; Step 5's specific implementation attempt is parked, not abandoned,
+pending investigation of the trough-collapse hypothesis (spatial layout as a
+stronger per-scene fingerprint than a pooled scalar) before any further attempt.

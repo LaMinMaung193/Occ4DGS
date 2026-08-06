@@ -1182,3 +1182,99 @@ false conclusions from it going forward, without needing to eliminate it at the
 source.
 
 ---
+
+## [Phase 5] Run ID: 2026-08-06-step5-spatial-panorama-gate2-gate3
+
+### Step 5 implemented and gated per the cost-controlled protocol (2026-08-06)
+
+Three pieces built and individually tested before wiring together (each has its own
+correctness test, not just a shape check):
+
+1. SpatialPoolFeatures (src/models/stage_b_temporal/spatial_pool_features.py) --
+   replaces PoolFeatures' full collapse-to-one-vector with a real spatial panorama
+   (24 angular bins around the vehicle), explicitly handling the 6 nuScenes cameras'
+   overlapping fields of view via smooth raised-cosine cross-camera blending, plus
+   preserved within-camera spatial detail (4 angular sub-samples per camera, not
+   collapsed to one scalar). Camera order confirmed against the real CAM_NAMES
+   (grouped FRONT/FRONT_RIGHT/FRONT_LEFT/BACK/BACK_RIGHT/BACK_LEFT, not a simple
+   clockwise ring). Yaw angles and FOV are NOMINAL rig-design values, not each
+   scene's true calibrated extrinsics -- flagged approximation, not yet revisited.
+   tests/test_spatial_pool_features.py confirms genuine blending (ablating one
+   camera's contribution measurably changes only the panorama bins it actually
+   overlaps into, leaves purely-single-camera bins exactly unaffected).
+2. Temporal conditioning: concat([panorama_curr, panorama_prev, panorama_curr -
+   panorama_prev]) instead of a single pre-computed difference vector -- richer
+   signal, lets the network use both frames' raw content plus the difference.
+3. SpatialConvHyperNet (src/models/stage_b_temporal/spatial_conv_hypernet.py) --
+   Option B chosen over Option A (a full polar/angle-radius-height coordinate system
+   matching the panorama's true geometry, kept as a future path if needed): the
+   24-bin ring is stretched via plain interpolation into a small 2D map, projected
+   and downsampled into a seed, then grown into the 3 output grids via Step 4's exact
+   unchanged ConvTranspose3d path. Fewer parameters than Step 4's ConvHyperNet
+   (260,772 vs 700,708). tests/test_spatial_conv_hypernet.py confirms perturbing one
+   input bin produces a genuinely non-uniform effect on the output grid (spatial
+   information CAN propagate through the architecture; untrained-network capacity
+   check, not a claim of semantic correctness, which requires training).
+
+grid_feat_dim stays 4 either way, so DeformHeadMu/DeformHeadR/the update rule are
+completely unchanged -- only how the grids are generated differs. Wired in behind
+USE_SPATIAL_STEP5 toggle (src/training/stage_b_engine.py) for direct comparison
+against the Steps 1-4 baseline.
+
+Two import-ordering bugs (same class as measure_noise_floor.py's) found and fixed
+during this work: GF3D_ROOT-dependent imports (`model`, `loss`, `misc.metric_util`)
+must come after whichever import triggers gf3d_pipeline's sys.path insertion --
+caught in stage_b_engine.py during Gate 1 and in scripts/train_stage1.py's own thin
+entrypoint (a leftover ordering mistake from before Step 5 began) during the actual
+Gate 2 run attempt.
+
+### Gate 1 (real-data wiring, no training): PASS
+
+tests/test_phase5_real_wiring.py ran end-to-end on real data with USE_SPATIAL_STEP5=True
+by default: correct G_0 shape (N_g=6400), G_1 provably distinct from G_0, GaussianHead
+splat callable standalone producing correct pred_occ shape, peak VRAM unchanged
+(3.11GB, same as before Step 5).
+
+### Gate 2 (n=3, one run, no repeats): AMBIGUOUS, escalated per protocol
+
+Best held-out delta: +0.080 at opt_step 40 (vs. best-ever n=3 reference of +0.125 from
+the Steps 1-4 era). Gap (0.045) is within the characterized noise band (~0.04-0.07),
+so this run alone cannot distinguish "worse" from "noise." Positive-delta window was
+narrower than the n=3 reference (opt_step 20-40 vs. 60-160), collapsing sooner.
+Per the gated protocol, an ambiguous (not clearly unpromising) Gate 2 result escalates
+to Gate 3 rather than being killed early.
+
+### Gate 3 (n=8, one run, no repeats): peak INCONCLUSIVE per protocol rule; trough is a
+new, real, concerning finding
+
+Best held-out delta: +0.085 at opt_step 60 (do-nothing=4.942). Compared against the
+best-ever n=8 results from Steps 1-4 (+0.106 Step 3, +0.100 Step 4): difference is
+0.021, well WITHIN the noise band. Per Gate 3's own decision rule, this is
+inconclusive -- STOPPING HERE, not escalating to Gate 4's expensive repeat protocol,
+exactly as the gated approach is designed to do (protects budget from confirming a
+result that isn't yet distinguishable from noise).
+
+HOWEVER, worth flagging separately from the peak-only Gate 3 rule: the TROUGH this run
+reaches is meaningfully worse than every prior version, well beyond the noise band --
+
+  Final-step delta:      Step1 -0.707 / Step2 -0.766 / Step3 -0.625 / Step4 -0.665 /
+                          Step5 -1.055
+  Worst point in the run: Step1 ~-0.78 / Step2 ~-0.79 / Step3 ~-0.72 / Step4 ~-0.78 /
+                          Step5 -1.173
+
+Every prior version plateaued in the -0.6 to -0.8 range; Step 5 collapses roughly
+0.3-0.5 further -- a real, new, worse failure mode, not explainable as measurement
+noise given its size relative to the characterized ~0.04-0.07 band.
+
+HYPOTHESIS (not yet tested): SpatialConvHyperNet has FEWER parameters than Step 4's
+ConvHyperNet (260K vs 700K), so this is likely not simple overfitting-via-capacity.
+More plausible: preserving real spatial layout (the panorama) may hand the model a
+stronger PER-SCENE FINGERPRINT than a single pooled scalar did, making the
+scene-recognition shortcut (originally fixed by delta-conditioning, EXPERIMENT_LOG.md
+Phase 5 early entries) easier to re-exploit through a different route -- a specific
+spatial arrangement is more distinctive per-scene than one number, giving the model
+more to memorize about "which scene is this" rather than "how does this scene move."
+
+### Decision: logged, not yet escalated to Gate 4; trough finding to be investigated
+before deciding whether to continue with the spatial-panorama approach as-is, adjust
+it, or revert to Steps 1-4's baseline as the working architecture.

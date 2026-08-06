@@ -2,18 +2,23 @@
 src/training/stage_b_engine.py
 
 Extracted from scripts/train_stage1.py during the Phase 5 repo-layout cleanup
-(EXPERIMENT_LOG.md) -- this file was quietly acting as a shared library (4 other
-scripts imported functions/constants directly from it, either via
-`from train_stage1 import (...)` or `import train_stage1 as ts1`), on top of being the
-main training entrypoint. That dual role, combined with an UNRELATED empty stub that
-happened to share the exact same name (src/training/train_stage1.py, now deleted),
-was a real latent bug risk -- resolved by making this the one real, intentional home
-for all the reusable Stage B engine code, with scripts/train_stage1.py now a thin
-entrypoint that imports from here.
+(EXPERIMENT_LOG.md) -- shared engine code reused across the training script and 4
+other diagnostic/evaluation scripts.
 
-Every name a consumer previously accessed via `ts1.<name>` (either import style) is
-preserved here so `import src.training.stage_b_engine as ts1` is a drop-in replacement
-for the old `import train_stage1 as ts1` pattern.
+Step 5 (EXPERIMENT_LOG.md): USE_SPATIAL_STEP5 toggle added, addressing the
+professor's feedback (pooling destroys spatial information; camera overlaps need
+explicit handling; relate properly to the previous frame) via three pieces:
+  1. SpatialPoolFeatures (spatial_pool_features.py) -- replaces PoolFeatures' full
+     collapse-to-one-vector with a real, camera-overlap-aware spatial panorama.
+  2. Temporal conditioning: concat([curr, prev, curr-prev]) panoramas, not a single
+     pre-computed difference vector.
+  3. SpatialConvHyperNet (spatial_conv_hypernet.py) -- redesigns the grid generator to
+     consume the real panorama instead of a flat vector, reusing Step 4's exact
+     ConvTranspose3d growth path unchanged.
+grid_feat_dim stays 4 either way, so DeformHeadMu/DeformHeadR/the update rule/
+everything downstream of the grids needs ZERO changes -- only how the grids are
+generated differs. USE_SPATIAL_STEP5=False reverts to the exact Steps 1-4 baseline
+for comparison (Gate 3/4 protocol, EXPERIMENT_LOG.md 2026-08-06).
 """
 import os
 
@@ -22,20 +27,18 @@ import torch.nn as nn
 
 # Must come BEFORE `import model`/`from misc.metric_util import ...` below -- those are
 # GaussianFormer3D's own top-level modules (not pip packages), only importable once
-# GF3D_ROOT is on sys.path, which this import does as a side effect. Original bug: this
-# ordering was inverted during extraction, causing ModuleNotFoundError: No module named
-# 'model' on the very first real run -- caught and fixed via the smoke test, exactly
-# what that test was for.
+# GF3D_ROOT is on sys.path, which this import does as a side effect.
 from src.datasets.gf3d_pipeline import REPO_ROOT, GF3D_ROOT, build_pipeline, to_batch_of_one  # noqa: F401
 
 from mmseg.models import build_segmentor
 import model  # noqa: F401 -- triggers @MODELS.register_module()/@SEGMENTORS.register_module() decorators
 from misc.metric_util import MeanIoU  # noqa: F401 -- re-exported, used by consumers via ts1.MeanIoU
+
 from src.datasets.occ4dgs_dataset import Occ4DGSDataset
 from src.datasets.occ4dgs_clip_dataset import Occ4DGSClipDataset
 from src.models.stage_b_temporal import (
     GaussianState,
-    ReferenceBuffer,  # noqa: F401 -- re-exported, used by scripts/train_stage1.py's main()
+    ReferenceBuffer,  # noqa: F401
     MotionHyperNet,  # noqa: F401 -- re-exported, kept available for comparison/rollback
     ConvHyperNet,
     query_motion_grid,  # noqa: F401 -- re-exported, kept available for comparison/rollback
@@ -50,6 +53,8 @@ from src.models.stage_b_temporal import (
 )
 from src.models.stage_b_temporal.current_frame_encoder import CurrentFrameEncoder  # noqa: F401
 from src.models.stage_b_temporal.pool_features import PoolFeatures
+from src.models.stage_b_temporal.spatial_pool_features import SpatialPoolFeatures
+from src.models.stage_b_temporal.spatial_conv_hypernet import SpatialConvHyperNet
 
 
 PC_RANGE = [-40.0, -40.0, -1.0, 40.0, 40.0, 5.4]
@@ -66,10 +71,19 @@ DROPOUT_P = 0.2
 USE_EGO_COMPENSATION = False
 
 USE_SPAWN_HEAD = True and USE_EGO_COMPENSATION
-SPAWN_GRID_FEAT_DIM = 24  # Step 3: query_motion_grid_pe_coordinate doubles z's dim
-                          # (sin+cos sample per level), 3 levels * 2 * 4 channels = 24
+SPAWN_GRID_FEAT_DIM = 24  # 3 levels * 2 (sin+cos) * 4 channels = 24
 SPAWN_POOLED_DIM = 128
 SPAWN_MAX_OFFSET = 2.0
+
+# Step 5 toggle: True = new spatial-panorama pipeline (pieces 1-3), False = exact
+# Steps 1-4 baseline (flat-vector PoolFeatures + ConvHyperNet). Flip to False to
+# re-run the known-good baseline for a Gate 3/4 comparison.
+USE_SPATIAL_STEP5 = True
+SPATIAL_POOL_OUT_CHANNELS = 32
+SPATIAL_PANORAMA_BINS = 24
+SPATIAL_K_SUBSAMPLES = 4
+SPATIAL_MAP2D_SIZE = 8
+SPATIAL_SEED_CHANNELS = 64
 
 
 def to_cuda(batch):
@@ -99,9 +113,25 @@ def build_stage_a(cfg):
 
 
 def build_temporal_module():
-    pool = PoolFeatures(img_channels=128, dpt_channels=112, num_levels=4, in_dim=128).cuda()
-    hypernet = ConvHyperNet(in_dim=128, grid_feat_dim=4, resolutions=(8, 16, 32),
-                             seed_res=4, seed_channels=64).cuda()
+    if USE_SPATIAL_STEP5:
+        pool = SpatialPoolFeatures(
+            img_channels=128, dpt_channels=112, num_levels=4,
+            out_channels=SPATIAL_POOL_OUT_CHANNELS, k_subsamples=SPATIAL_K_SUBSAMPLES,
+            panorama_bins=SPATIAL_PANORAMA_BINS,
+        ).cuda()
+        hypernet = SpatialConvHyperNet(
+            in_channels=3 * SPATIAL_POOL_OUT_CHANNELS,  # curr, prev, diff panoramas
+            resolutions=(8, 16, 32), grid_feat_dim=4,
+            panorama_bins=SPATIAL_PANORAMA_BINS, map2d_size=SPATIAL_MAP2D_SIZE,
+            seed_channels=SPATIAL_SEED_CHANNELS,
+        ).cuda()
+    else:
+        pool = PoolFeatures(img_channels=128, dpt_channels=112, num_levels=4, in_dim=128).cuda()
+        hypernet = ConvHyperNet(in_dim=128, grid_feat_dim=4, resolutions=(8, 16, 32),
+                                 seed_res=4, seed_channels=64).cuda()
+
+    # grid_feat_dim=4 either way -> in_dim=3*2*4=24 either way (query_motion_grid_pe_coordinate's
+    # two samples -- sin, cos -- per level), completely unaffected by USE_SPATIAL_STEP5.
     deform_mu = DeformHeadMu(in_dim=3 * 2 * 4, hidden_dim=128).cuda()
     deform_r = DeformHeadR(in_dim=3 * 2 * 4, hidden_dim=128, max_angle_rad=0.3).cuda()
     feature_dropout = nn.Dropout(p=DROPOUT_P).cuda()
@@ -143,9 +173,18 @@ def deform_one_step(g_prev, encoder, pool, hypernet, deform_mu, deform_r,
         ms_img_feats_curr, _dpt_dist_curr, out_dpt_multiscale_curr = encoder.encode(
             cuda_curr["imgs"], cuda_curr["dpt"], cuda_curr["metas"]
         )
-    pooled_prev = pool(ms_img_feats_prev, out_dpt_multiscale_prev)
-    pooled_curr = pool(ms_img_feats_curr, out_dpt_multiscale_curr)
-    pooled_delta = feature_dropout(pooled_curr - pooled_prev)
+
+    if USE_SPATIAL_STEP5:
+        panorama_prev = pool(ms_img_feats_prev, out_dpt_multiscale_prev)  # (B, C_pool, P)
+        panorama_curr = pool(ms_img_feats_curr, out_dpt_multiscale_curr)  # (B, C_pool, P)
+        panorama_diff = panorama_curr - panorama_prev
+        pooled_delta = feature_dropout(
+            torch.cat([panorama_curr, panorama_prev, panorama_diff], dim=1)
+        )  # (B, 3*C_pool, P)
+    else:
+        pooled_prev = pool(ms_img_feats_prev, out_dpt_multiscale_prev)
+        pooled_curr = pool(ms_img_feats_curr, out_dpt_multiscale_curr)
+        pooled_delta = feature_dropout(pooled_curr - pooled_prev)
 
     grids = hypernet(pooled_delta)
     means_flat = g_prev.means.squeeze(0) if g_prev.means.dim() == 3 else g_prev.means
@@ -169,7 +208,7 @@ def deform_one_step(g_prev, encoder, pool, hypernet, deform_mu, deform_r,
             means_flat, delta_mu, relative_transform, PC_RANGE
         )
         z_candidate = query_motion_grid_pe_coordinate(wrapped_base, grids, PC_RANGE)
-        spawn_offset, spawn_opacity, spawn_semantics = spawn_head(z_candidate, pooled_delta)
+        spawn_offset, spawn_opacity, spawn_semantics = spawn_head(z_candidate, pooled_delta.mean(dim=-1))
 
     g_t = apply_ego_compensated_update_rule(
         g_prev, delta_mu, delta_r, relative_transform, pc_range=PC_RANGE,

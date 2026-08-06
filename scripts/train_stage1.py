@@ -29,12 +29,14 @@ import json  # noqa: E402
 import torch  # noqa: E402
 from mmengine import Config  # noqa: E402
 
-from loss import OPENOCC_LOSS  # noqa: E402
-
 from src.datasets.nuscenes_mini import load_nuscenes  # noqa: E402
 from src.datasets.occ4dgs_dataset import Occ4DGSDataset  # noqa: E402
 from src.datasets.occ4dgs_clip_dataset import Occ4DGSClipDataset  # noqa: E402
 
+# Must come BEFORE `from loss import OPENOCC_LOSS` below -- loss.py is
+# GaussianFormer3D's own top-level module (not a pip package), only importable once
+# GF3D_ROOT is on sys.path, which this import does as a side effect (same class of
+# ordering bug already found and fixed in stage_b_engine.py and measure_noise_floor.py).
 from src.training.stage_b_engine import (  # noqa: E402
     REPO_ROOT,
     GF3D_ROOT,
@@ -53,6 +55,8 @@ from src.training.stage_b_engine import (  # noqa: E402
     CurrentFrameEncoder,
     ReferenceBuffer,
 )
+
+from loss import OPENOCC_LOSS  # noqa: E402
 
 import wandb  # noqa: E402
 

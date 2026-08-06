@@ -1060,3 +1060,125 @@ once that noise floor is known can Steps 1-4's improvements and the scene-scalin
 ranking be properly assessed as signal vs. noise.
 
 ---
+
+## [Phase 5] Run ID: 2026-08-06-noise-floor-localized-stopping-point
+
+### Step 0: noise-floor localization (measure_noise_floor.py)
+
+Root cause of the do-nothing baseline's run-to-run variance (~0.036-0.07 across
+various tests) is now precisely localized, via a sequence of cheap, no-training
+diagnostics:
+
+1. Confirmed NOT random-seed sensitivity (SEED=42 was already fixed across the
+   original 4-run scene-scaling sweep that first surfaced this).
+2. torch.backends.cudnn.deterministic=True alone: no effect.
+3. torch.use_deterministic_algorithms(True, warn_only=True): surfaced real CuBLAS
+   matmul non-determinism (notably in gaussian_head.py's covariance computation,
+   directly upstream of pred_occ) plus two unfixable-in-this-PyTorch-version,
+   loss-only ops (nll_loss2d, cumsum -- confirmed NOT reachable from pred_occ/mIoU,
+   since evaluate_heldout scores only pred_occ.argmax(), never the loss value).
+4. CUBLAS_WORKSPACE_CONFIG=:4096:8: confirmed (via warning disappearance) fixed the
+   CuBLAS matmul issue specifically -- but overall range barely moved, so CuBLAS was
+   real but not the dominant source.
+5. bisect(): splatting/head is PERFECTLY bit-identical across 5 repeats (fully
+   exonerated). Stage A's encoder alone is NOT (max abs diff 76.8 on position values
+   ranging [-40,40] -- magnitude far too large for ordinary floating-point
+   reduction-order noise, more consistent with an actual bug, e.g. uninitialized GPU
+   memory in a custom kernel, than benign non-determinism).
+6. bisect_fine(): camera backbone+FPN and the depth head are BOTH perfectly
+   bit-identical across 5 repeats. FINAL LOCALIZATION: the non-determinism is
+   specifically inside the iterative Gaussian-refinement blocks -- DFA3D's custom
+   deformable-attention CUDA kernel and/or the sparse-conv self-encoding step --
+   the only genuinely custom, non-standard-PyTorch machinery in the entire Stage A
+   pipeline. Every standard op (conv, FPN, depth head, splatting) is clean.
+
+### Decision: STOPPING HERE, by deliberate choice, not because further progress is
+impossible
+
+Weighed explicitly before this session's diagnostic work began: a full fix would
+require C++/CUDA-level debugging of third-party compiled kernels (DFA3D and/or
+GaussianFormer3D's own sparse-conv code) -- a different skill set, unbounded time
+cost, and a direct distraction from the actual Step 5 research work already directed
+by the professor. The localization achieved (bisect_fine, one step from the exact
+kernel) is precise enough to document confidently without needing to go further.
+
+### Practical path forward (adopted, not deferred)
+
+Treat the measured noise magnitude (~0.04-0.07 in adjusted mIoU) as a known,
+characterized constant of this pipeline. Going forward: any future architecture
+comparison (Step 5 onward) must be run multiple times and compared as a distribution,
+not a single point estimate, before a difference is treated as real. This directly
+resolves the standing concern flagged at the end of the Steps 1-4 arc (2026-07-30) --
+we now know precisely why that noise existed and roughly how large it is, without
+needing to eliminate it at the source.
+
+---
+
+## [Phase 5] Run ID: 2026-08-06-step0-noise-floor-localized-and-protocol-adopted
+
+### Step 0: noise-floor localization complete (scripts/measure_noise_floor.py)
+
+Root cause of the do-nothing baseline's run-to-run variance (first found 2026-07-30,
+~0.036 across a 4-run scene-scaling sweep) is now precisely localized via a sequence
+of cheap, no-training diagnostics, all with real evidence at each step:
+
+1. NOT random-seed sensitivity -- SEED=42 was already fixed across all 4 original
+   sweep runs when the variance first appeared.
+2. torch.backends.cudnn.deterministic=True alone: no effect (range 0.041->0.061).
+3. torch.use_deterministic_algorithms(True, warn_only=True): surfaced real CuBLAS
+   matmul non-determinism (gaussian_head.py's covariance computation, directly
+   upstream of pred_occ) plus two unfixable-in-this-PyTorch-version, loss-only ops
+   (nll_loss2d, cumsum) -- confirmed NOT reachable from pred_occ/mIoU, since
+   evaluate_heldout scores only pred_occ.argmax(), never the loss value itself.
+4. CUBLAS_WORKSPACE_CONFIG=:4096:8: confirmed via warning disappearance that it fixed
+   the CuBLAS matmul issue specifically -- overall range barely moved (0.036->0.040),
+   so CuBLAS was real but not the dominant source.
+5. bisect(): splatting/GaussianHead is PERFECTLY bit-identical across 5 repeats (fully
+   exonerated). Stage A's encoder alone is NOT (max abs diff 76.8 on position values
+   ranging [-40,40] -- far too large for ordinary floating-point reduction-order
+   noise, more consistent with an actual bug, e.g. uninitialized GPU memory in a
+   custom kernel, than benign non-determinism).
+6. bisect_fine(): camera backbone+FPN and the depth head are BOTH perfectly
+   bit-identical across 5 repeats. FINAL LOCALIZATION: non-determinism is specifically
+   inside the iterative Gaussian-refinement blocks -- DFA3D's custom
+   deformable-attention CUDA kernel and/or the sparse-conv self-encoding step -- the
+   only genuinely custom, non-standard-PyTorch machinery in the entire Stage A
+   pipeline. Every standard op (conv, FPN, depth head, splatting) confirmed clean.
+
+### Decision: stopping the fix here, deliberately
+
+A full fix requires C++/CUDA-level debugging of third-party compiled kernels (DFA3D
+and/or GaussianFormer3D's own sparse-conv code) -- different skill set, unbounded time
+cost, direct distraction from the professor-directed Step 5 work. The localization
+achieved is precise enough to document confidently without going further. Noise
+magnitude adopted as a known, characterized constant: ~0.04-0.07 in adjusted mIoU.
+
+### Adopted going forward: gated, cost-controlled comparison protocol
+
+To avoid spending the expensive repeated-run budget on ideas that don't pan out,
+every future architecture change (Step 5 onward) goes through staged gates, each only
+reached if the previous one earns it:
+
+  - Gate 1 (minutes): does it run end-to-end without crashing, loss visibly decreases
+    over a handful of steps on one scene (same pattern as test_phase5_real_wiring.py).
+    Fail -> fix the bug, do not train further.
+  - Gate 2 (~1-1.5 hrs, one run, n=3, no repeats): does the held-out delta look at all
+    promising, or clearly flat/negative? Unpromising -> stop, do not escalate to n=8.
+  - Gate 3 (~3 hrs, one run, n=8, no repeats yet): compare the single result against
+    the known noise band (~0.04-0.07) relative to current best baseline. Within the
+    noise band -> stop, "indistinguishable from noise," do not spend repeat budget.
+  - Gate 4 (~15-21 hrs, ONLY for a genuine standout that clearly exceeds the noise
+    band at Gate 3): 3 repeats per side (new design vs. immediately-preceding
+    baseline), same seed/protocol otherwise. Report mean/min/max per side, not a
+    single point. Decision rule: non-overlapping ranges = real improvement;
+    overlapping ranges = inconclusive (not "no effect" -- N=3 genuinely cannot tell
+    the difference), reserved for genuine decision points, not every intermediate
+    tweak.
+
+This directly resolves the standing concern flagged at the end of the Steps 1-4 arc
+(2026-07-30 retrospective) -- the mechanism behind that noise is now known and
+characterized, and a concrete, budget-aware protocol is in place to avoid drawing
+false conclusions from it going forward, without needing to eliminate it at the
+source.
+
+---

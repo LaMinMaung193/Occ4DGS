@@ -55,6 +55,7 @@ from src.models.stage_b_temporal.current_frame_encoder import CurrentFrameEncode
 from src.models.stage_b_temporal.pool_features import PoolFeatures
 from src.models.stage_b_temporal.spatial_pool_features import SpatialPoolFeatures
 from src.models.stage_b_temporal.spatial_conv_hypernet import SpatialConvHyperNet
+from src.models.stage_b_temporal.direct_projection_sampler import DirectProjectionSampler
 
 
 PC_RANGE = [-40.0, -40.0, -1.0, 40.0, 40.0, 5.4]
@@ -91,6 +92,27 @@ SPATIAL_K_SUBSAMPLES = 4
 SPATIAL_MAP2D_SIZE = 8
 SPATIAL_SEED_CHANNELS = 64
 
+# Option D toggle (docs/OPTION_D_DESIGN.md): True = per-Gaussian direct projection +
+# real-image-feature sampling (DirectProjectionSampler), skipping the intermediate 3D
+# motion grid entirely -- no pool/hypernet/query_motion_grid_pe_coordinate chain at
+# all. False = whichever of USE_SPATIAL_STEP5's two branches is active (both still go
+# through that grid chain). New, untested branch -- default False until Gate 1
+# confirms it runs end-to-end on real data (this is the immediate next step).
+USE_DIRECT_PROJECTION = False
+# Section 4, decision 1's "simplest starting choice": one mid-resolution level, not a
+# multi-level concatenation.
+DIRECT_PROJECTION_LEVEL_IDX = 1
+# Confirmed against configs/occ4dgs_mini_occ3d_gs6400.py's real d_bound=[2.0, 58, 0.5]
+# (only d_bound[0]/d_bound[1] are used by project_points_3d; see
+# direct_projection_sampler.py's module docstring) -- not invented.
+DIRECT_PROJECTION_D_BOUND = (2.0, 58.0)
+
+assert not (USE_DIRECT_PROJECTION and USE_SPATIAL_STEP5), (
+    "USE_DIRECT_PROJECTION and USE_SPATIAL_STEP5 are mutually exclusive strategies "
+    "for Stage B's temporal conditioning (one replaces the other's entire chain) -- "
+    "enable at most one at a time."
+)
+
 
 def to_cuda(batch):
     out = {"imgs": batch["imgs"].cuda(), "points": [t.cuda() for t in batch["points"]]}
@@ -119,7 +141,20 @@ def build_stage_a(cfg):
 
 
 def build_temporal_module():
-    if USE_SPATIAL_STEP5:
+    if USE_DIRECT_PROJECTION:
+        pool = DirectProjectionSampler(
+            img_channels=128, dpt_channels=112,
+            level_idx=DIRECT_PROJECTION_LEVEL_IDX, d_bound=DIRECT_PROJECTION_D_BOUND,
+        ).cuda()
+        # Option D has no intermediate grid (OPTION_D_DESIGN.md Section 2) -- this
+        # slot is an unused nn.Identity() placeholder purely so every OTHER consumer
+        # of build_temporal_module()'s 7-tuple (evaluate_heldout's train()/eval()
+        # sweep over `modules`, scripts/train_stage1.py's optimizer param groups,
+        # etc.) keeps working unchanged without touching those call sites.
+        # deform_one_step's USE_DIRECT_PROJECTION branch never calls it.
+        hypernet = nn.Identity().cuda()
+        deform_in_dim = pool.z_dim
+    elif USE_SPATIAL_STEP5:
         pool = SpatialPoolFeatures(
             img_channels=128, dpt_channels=112, num_levels=4,
             out_channels=SPATIAL_POOL_OUT_CHANNELS, k_subsamples=SPATIAL_K_SUBSAMPLES,
@@ -131,15 +166,17 @@ def build_temporal_module():
             panorama_bins=SPATIAL_PANORAMA_BINS, map2d_size=SPATIAL_MAP2D_SIZE,
             seed_channels=SPATIAL_SEED_CHANNELS,
         ).cuda()
+        # grid_feat_dim=4 -> in_dim=3*2*4=24 (query_motion_grid_pe_coordinate's two
+        # samples -- sin, cos -- per level).
+        deform_in_dim = 3 * 2 * 4
     else:
         pool = PoolFeatures(img_channels=128, dpt_channels=112, num_levels=4, in_dim=128).cuda()
         hypernet = ConvHyperNet(in_dim=128, grid_feat_dim=4, resolutions=(8, 16, 32),
                                  seed_res=4, seed_channels=64).cuda()
+        deform_in_dim = 3 * 2 * 4
 
-    # grid_feat_dim=4 either way -> in_dim=3*2*4=24 either way (query_motion_grid_pe_coordinate's
-    # two samples -- sin, cos -- per level), completely unaffected by USE_SPATIAL_STEP5.
-    deform_mu = DeformHeadMu(in_dim=3 * 2 * 4, hidden_dim=128).cuda()
-    deform_r = DeformHeadR(in_dim=3 * 2 * 4, hidden_dim=128, max_angle_rad=0.3).cuda()
+    deform_mu = DeformHeadMu(in_dim=deform_in_dim, hidden_dim=128).cuda()
+    deform_r = DeformHeadR(in_dim=deform_in_dim, hidden_dim=128, max_angle_rad=0.3).cuda()
     feature_dropout = nn.Dropout(p=DROPOUT_P).cuda()
     z_dropout = nn.Dropout(p=DROPOUT_P).cuda()
     spawn_head = None
@@ -180,21 +217,49 @@ def deform_one_step(g_prev, encoder, pool, hypernet, deform_mu, deform_r,
             cuda_curr["imgs"], cuda_curr["dpt"], cuda_curr["metas"]
         )
 
-    if USE_SPATIAL_STEP5:
+    means_flat = g_prev.means.squeeze(0) if g_prev.means.dim() == 3 else g_prev.means
+
+    # Computed unconditionally now (cheap, pure -- just two 4x4s) rather than only
+    # inside the USE_EGO_COMPENSATION branch further down: USE_DIRECT_PROJECTION
+    # needs this to project each Gaussian into frame t's real cameras even when
+    # USE_EGO_COMPENSATION is off (Option D's sampling and the update rule's
+    # ego-compensation are independent uses of the same transform).
+    pose_prev = cuda_prev["metas"]["lidar2global"][0]
+    pose_curr = cuda_curr["metas"]["lidar2global"][0]
+    relative_transform = compute_relative_transform(pose_prev, pose_curr)
+
+    grids = None
+    pooled_delta = None
+    if USE_DIRECT_PROJECTION:
+        # OPTION_D_DESIGN.md Section 2: no intermediate grid at all -- pool() here is
+        # a DirectProjectionSampler, called with its own signature (means +
+        # relative_transform + both frames' real features/projection/image_wh), not
+        # the (ms_img_feats, out_dpt_multiscale) signature PoolFeatures/
+        # SpatialPoolFeatures use. hypernet is intentionally unused (see
+        # build_temporal_module).
+        z = z_dropout(pool(
+            means_flat, relative_transform,
+            ms_img_feats_prev, out_dpt_multiscale_prev,
+            cuda_prev["metas"]["projection_mat"], cuda_prev["metas"]["image_wh"],
+            ms_img_feats_curr, out_dpt_multiscale_curr,
+            cuda_curr["metas"]["projection_mat"], cuda_curr["metas"]["image_wh"],
+        ))
+    elif USE_SPATIAL_STEP5:
         panorama_prev = pool(ms_img_feats_prev, out_dpt_multiscale_prev)  # (B, C_pool, P)
         panorama_curr = pool(ms_img_feats_curr, out_dpt_multiscale_curr)  # (B, C_pool, P)
         panorama_diff = panorama_curr - panorama_prev
         pooled_delta = feature_dropout(
             torch.cat([panorama_curr, panorama_prev, panorama_diff], dim=1)
         )  # (B, 3*C_pool, P)
+        grids = hypernet(pooled_delta)
+        z = z_dropout(query_motion_grid_pe_coordinate(means_flat, grids, PC_RANGE))
     else:
         pooled_prev = pool(ms_img_feats_prev, out_dpt_multiscale_prev)
         pooled_curr = pool(ms_img_feats_curr, out_dpt_multiscale_curr)
         pooled_delta = feature_dropout(pooled_curr - pooled_prev)
+        grids = hypernet(pooled_delta)
+        z = z_dropout(query_motion_grid_pe_coordinate(means_flat, grids, PC_RANGE))
 
-    grids = hypernet(pooled_delta)
-    means_flat = g_prev.means.squeeze(0) if g_prev.means.dim() == 3 else g_prev.means
-    z = z_dropout(query_motion_grid_pe_coordinate(means_flat, grids, PC_RANGE))
     delta_mu = deform_mu(z)
     delta_r = deform_r(z)
 
@@ -204,12 +269,16 @@ def deform_one_step(g_prev, encoder, pool, hypernet, deform_mu, deform_r,
             return g_t, delta_mu, delta_r
         return g_t
 
-    pose_prev = cuda_prev["metas"]["lidar2global"][0]
-    pose_curr = cuda_curr["metas"]["lidar2global"][0]
-    relative_transform = compute_relative_transform(pose_prev, pose_curr)
-
     spawn_offset = spawn_opacity = spawn_semantics = None
     if spawn_head is not None:
+        if USE_DIRECT_PROJECTION:
+            raise NotImplementedError(
+                "SpawnHead assumes a queryable dense motion grid (query_motion_grid_"
+                "pe_coordinate on candidate positions) -- Option D has no grid to "
+                "query. USE_SPAWN_HEAD/USE_EGO_COMPENSATION + USE_DIRECT_PROJECTION "
+                "together is not yet supported; this combination needs its own "
+                "design, not a silent fallback."
+            )
         wrapped_base, _out_of_range = compute_spawn_candidate_positions(
             means_flat, delta_mu, relative_transform, PC_RANGE
         )

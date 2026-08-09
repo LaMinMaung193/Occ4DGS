@@ -1314,3 +1314,109 @@ information, camera overlaps need handling, temporal conditioning is weak -- rem
 unresolved; Step 5's specific implementation attempt is parked, not abandoned,
 pending investigation of the trough-collapse hypothesis (spatial layout as a
 stronger per-scene fingerprint than a pooled scalar) before any further attempt.
+
+---
+
+## [Phase 5] Run ID: 2026-08-08-option-d-direct-projection-gate1-gate2-gate3
+
+### Option D implemented and gated per the cost-controlled protocol
+
+DirectProjectionSampler (src/models/stage_b_temporal/direct_projection_sampler.py)
+built and tested standalone (tests/test_direct_projection_sampler.py) per
+OPTION_D_DESIGN.md, verified line-by-line against the real GaussianFormer3D source
+(project_points_3d) before implementation, not assumed from the design doc alone.
+Wired into stage_b_engine.py behind USE_DIRECT_PROJECTION, mutually exclusive with
+USE_SPATIAL_STEP5. Skips the intermediate 3D motion grid entirely -- each Gaussian is
+projected directly into both frames' real camera images and samples real image+depth
+features there, concatenated as z=[f_prev, f_curr, f_curr-f_prev] (720-d), fed into
+unchanged DeformHeadMu/DeformHeadR (in_dim switched from 24 to 720). Branch
+step5b-direct-projection, commits e29bfac (module+test) / 05b66b7 (wiring).
+
+### Gate 1 (real-data wiring, no training): PASS
+
+tests/test_phase5_real_wiring.py ran end-to-end on real data with
+USE_DIRECT_PROJECTION=True: correct G_0 shape (N_g=6400), G_1 provably distinct from
+G_0 (mean abs delta 1.996), GaussianHead splat callable standalone producing correct
+pred_occ shape, peak VRAM 3.11GB -- identical to the Steps 1-4/Step 5 baseline
+despite per-Gaussian real-image sampling replacing pooling (no memory regression from
+the architecture change).
+
+### Gate 2 (n=3): ambiguous at default budget, escalated after a budget extension
+
+Default 20-epoch/585-opt-step budget: best held-out delta -0.086 at opt_step 560,
+never crossed positive. Unlike every prior architecture (which peaked early, opt_step
+20-80, then degraded), this run was still monotonically climbing at the final eval
+point -- a qualitatively different trajectory shape than the "early peak, then
+collapse" pattern the gate budget was tuned around.
+
+Extended to 40 epochs (1170 opt steps) to test whether the climb would continue: best
+held-out delta improved to +0.076 at opt_step 560, crossing positive for the first
+time at opt_step 420. Compared to Steps 1-4's best-ever n=3 (+0.125) and Step 5's
+ambiguous n=3 (+0.080): this sits in the same ambiguous territory as Step 5, not
+clearly better or worse.
+
+Notably, once past opt_step 420, the trough looked shallower than any prior
+architecture at this scale -- oscillating roughly -0.42 to +0.08 for the remainder of
+the extended run, vs. Steps 1-4's -0.6 to -0.8 characteristic plateau or Step 5's
+-1.055 collapse. This did NOT hold up at Gate 3 (see below).
+
+Per protocol, an ambiguous (not clearly unpromising) Gate 2 result escalates to
+Gate 3.
+
+### Gate 3 (n=8, 40 epochs/3160 opt steps -- budget not reverted to the standard
+20-epoch/~1580-opt-step reference before this run, an oversight; the run is roughly
+2x the length of every prior architecture's Gate 3): peak INCONCLUSIVE per protocol
+rule; trough shows a real, recurring instability, arguably worse than Step 5's
+
+Best held-out delta: +0.082 at opt_step 1600 (do-nothing=4.973). Compared against the
+best-ever n=8 results from Steps 1-4 (+0.106 Step 3, +0.100 Step 4) and Step 5's
+Gate 3 (+0.085): difference from all three is 0.018-0.024, well within the ~0.04-0.07
+noise band. Per Gate 3's own decision rule, this is inconclusive.
+
+HOWEVER, distinct from Step 5's failure mode: rather than a single collapse point,
+this run's trough OSCILLATES repeatedly and continuously into deep-negative territory
+throughout the second half of an unusually long run, never stabilizing:
+
+  -0.863 (1000)  -0.955 (1080)  -0.958 (1160)  -1.045 (1240)
+  -0.886 (1320)  -0.840 (1400)  -1.052 (1480)  -0.836 (1560)
+  -0.969 (1640)  -0.850 (1800)  -0.794 (1960)  -0.849 (2040)
+
+These recur at roughly the same magnitude as Step 5's single flagged -1.055 collapse,
+but repeatedly, all the way to the end of a budget roughly 2x longer than any prior
+architecture's Gate 3 -- i.e. more training did not resolve the instability; it reads
+as a per-step oscillation, not a converging trend.
+
+HYPOTHESIS (not yet tested): unlike every prior architecture, whose z came from
+query_motion_grid_pe_coordinate's bounded [-1,1] sin/cos positional encoding,
+DirectProjectionSampler's z is raw, unnormalized, high-dimensional (720-d)
+concatenated CNN feature-map values (image + depth), with no normalization step
+anywhere in the module before DeformHeadMu/DeformHeadR. An unbounded, unnormalized,
+higher-dimensional input is a plausible cause of both the slower Gate 2 convergence
+and this per-step output instability -- small weight updates producing large output
+swings -- though not yet confirmed.
+
+### Decision: logged, not escalated to Gate 4; stopping per protocol, matching the
+Step 5 precedent
+
+Per the established protocol and the precedent set with Step 5 (peak inconclusive vs.
+noise floor does not by itself justify continuing to Gate 4's expensive repeat
+protocol), and given the trough finding here is arguably a MORE clear-cut concern
+than Step 5's (recurring rather than a single collapse point, despite double the
+training budget) -- stopping here. USE_DIRECT_PROJECTION reverted to False; Steps 1-4
+remains the active baseline.
+
+DirectProjectionSampler's code, test, and wiring are fully intact and committed
+(branch step5b-direct-projection, commits e29bfac / 05b66b7) -- nothing deleted.
+USE_DIRECT_PROJECTION=True resumes this investigation whenever picked back up.
+
+### Next planned step (not yet started)
+
+The core idea (real per-Gaussian geometric projection into real camera images,
+replacing every approximation the grid-based approaches introduced) remains
+architecturally well-motivated and is not being abandoned outright. Before moving to
+a different design, plan to test the normalization hypothesis above as a targeted,
+minimal variant: add a normalization step (e.g. LayerNorm) to z before
+DeformHeadMu/DeformHeadR, re-run Gate 1->2->3 fresh (not a continuation of this run).
+Agreed stopping rule going in: if this variant does not show clear, meaningful
+improvement over this entry's numbers, move on to a different design rather than
+continuing to iterate on this one.

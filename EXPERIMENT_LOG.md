@@ -1420,3 +1420,70 @@ DeformHeadMu/DeformHeadR, re-run Gate 1->2->3 fresh (not a continuation of this 
 Agreed stopping rule going in: if this variant does not show clear, meaningful
 improvement over this entry's numbers, move on to a different design rather than
 continuing to iterate on this one.
+
+---
+
+## [Phase 5] Run ID: 2026-08-09-option-d-normalization-variant-gate1-gate2
+
+### Normalization variant implemented and gated (see prior entry's "next planned step")
+
+Added a shared nn.LayerNorm(feat_dim), applied to each frame's pooled feature
+independently (not one LayerNorm over the whole concatenated z -- see
+direct_projection_sampler.py's feat_norm docstring: a single joint LayerNorm has a
+separate learnable affine per position, which would break the "identical fallback in
+both frames -> exactly zero diff" invariant; caught and fixed during this session's
+own re-verification before committing). z_dim unchanged (720) -- no changes needed to
+stage_b_engine.py's wiring.
+
+### Gate 1 (real-data wiring, no training): PASS, and directly confirms the hypothesis
+
+tests/test_phase5_real_wiring.py: delta_mu range -0.730 to 0.836, vs. -4.0 to 4.0
+(fully saturated at DeformHeadMu's tanh bound) in the un-normalized variant --
+concrete, direct evidence the unbounded/unnormalized z was pushing the head into
+saturation at init, exactly as hypothesized. mean_abs_delta from G_0 dropped
+accordingly (0.208 vs. 1.996). Peak VRAM unchanged, 3.11GB.
+
+### Gate 2 (n=3, default 20-epoch/585-opt-step budget): a genuinely different, more
+
+stable shape, but a stable plateau BELOW zero, not ambiguous-and-still-climbing
+
+Best held-out delta: -0.099 at opt_step 160. Reaches this steady band by opt_step 160
+(epoch 5) -- vs. the un-normalized variant, still deep in -3 to -4 territory at that
+point in its own Gate 2 run, needing until opt_step 400+ to find any footing. From
+opt_step 160 through 580 (14 more epochs, the rest of the run), sits in a tight -0.10
+to -0.29 band -- no oscillation into -1+ territory (unlike either the un-normalized
+Gate 2 or Gate 3 runs), but also no further improvement; flat, not still climbing.
+
+Compared against references: gap from Steps 1-4's best-ever n=3 (+0.125) is 0.224;
+gap from Step 5's ambiguous n=3 (+0.080) is 0.179; gap from the un-normalized Option D
+variant's extended-budget n=3 (+0.076) is 0.175. All three gaps are well outside the
+~0.04-0.07 noise band -- unlike both prior Option D attempts, this reads as clearly
+UNPROMISING rather than ambiguous: the fast, stable convergence confirms the
+normalization hypothesis was correct (instability is resolved), but a real performance
+gap remains that does not look like a training-budget issue this time (flat plateau,
+not a still-rising trajectory).
+
+### Decision: stop per protocol; not escalating to Gate 3
+
+Per the protocol and the standing agreement going into this variant (no clear
+improvement -> move to a different design rather than continuing to iterate), and
+given Gate 2 here reads as unpromising rather than ambiguous (unlike either prior
+Option D attempt, both of which escalated) -- stopping at Gate 2, not running Gate 3.
+USE_DIRECT_PROJECTION reverted to False; Steps 1-4 remains the active baseline.
+
+### Overall Option D conclusion (both variants)
+
+Un-normalized: Gate 3 (n=8) peak inconclusive vs. noise floor; trough oscillated
+repeatedly into -0.84 to -1.05 territory, arguably worse than Step 5's single -1.055
+collapse point since it recurred throughout an extended run rather than occurring once.
+Normalized: instability resolved (confirmed via Gate 1's delta_mu range and Gate 2's
+tight, stable band), but Gate 2 itself is a clear, stable plateau below zero -- worse
+than both Steps 1-4 and Step 5's best-ever numbers by a margin outside the noise band.
+
+Per the agreed stopping rule, Option D (the direct per-Gaussian projection+sampling
+approach, in both its un-normalized and normalized forms) does not show meaningful
+improvement over the existing baselines. Both variants' code, tests, and wiring are
+fully intact and committed (branch step5b-direct-projection) -- nothing deleted;
+USE_DIRECT_PROJECTION=True resumes either investigation whenever picked back up.
+Moving to consider a different design next, rather than continuing to iterate on
+Option D.

@@ -55,6 +55,8 @@ from src.models.stage_b_temporal.current_frame_encoder import CurrentFrameEncode
 from src.models.stage_b_temporal.pool_features import PoolFeatures
 from src.models.stage_b_temporal.spatial_pool_features import SpatialPoolFeatures
 from src.models.stage_b_temporal.spatial_conv_hypernet import SpatialConvHyperNet
+from src.models.stage_b_temporal.vggt_wrapper import VGGTWrapper
+from src.models.stage_b_temporal.deformable_temporal_block import VGGTDeformableController
 
 
 PC_RANGE = [-40.0, -40.0, -1.0, 40.0, 40.0, 5.4]
@@ -91,6 +93,29 @@ SPATIAL_K_SUBSAMPLES = 4
 SPATIAL_MAP2D_SIZE = 8
 SPATIAL_SEED_CHANNELS = 64
 
+# VGGT_DEFORMABLE_DESIGN.md toggle: True = the new VGGT-backed deformable
+# cross-attention mechanism (VGGTWrapper + InitialQueryEmbed + 4 independent
+# DeformableTemporalBlock instances), entirely replacing the pool/hypernet/
+# query_motion_grid_pe_coordinate chain -- no intermediate grid, no ResNet+FPN
+# encoder.encode() call at all for this path (see deform_one_step). Mutually
+# exclusive with USE_SPATIAL_STEP5 (one replaces the other's entire chain). New,
+# untested branch -- default False until Gate 1 confirms it runs end-to-end on real
+# data.
+USE_VGGT_DEFORMABLE = False
+VGGT_QUERY_DIM = 128
+VGGT_K = 4  # Liam's confirmed decision -- matches Deformable DETR/DFA3D's magnitude
+VGGT_NUM_BLOCKS = 4  # matches Stage A's own 4-decoder-block precedent
+# Confirmed against configs/occ4dgs_mini_occ3d_gs6400.py's real d_bound=[2.0, 58, 0.5]
+# -- same value/derivation as Option D's DIRECT_PROJECTION_D_BOUND (not re-invented,
+# just independently named since that constant doesn't exist on this branch).
+VGGT_D_BOUND = (2.0, 58.0)
+
+assert not (USE_VGGT_DEFORMABLE and USE_SPATIAL_STEP5), (
+    "USE_VGGT_DEFORMABLE and USE_SPATIAL_STEP5 are mutually exclusive strategies "
+    "for Stage B's temporal conditioning (one replaces the other's entire chain) -- "
+    "enable at most one at a time."
+)
+
 
 def to_cuda(batch):
     out = {"imgs": batch["imgs"].cuda(), "points": [t.cuda() for t in batch["points"]]}
@@ -124,7 +149,29 @@ def build_stage_a(cfg):
 
 
 def build_temporal_module():
-    if USE_SPATIAL_STEP5:
+    if USE_VGGT_DEFORMABLE:
+        # Real ~1B-parameter download (VGGT.from_pretrained) -- only happens when
+        # this toggle is actually on, never as a side effect of importing this file.
+        vggt_wrapper = VGGTWrapper().cuda()
+        # VGGTDeformableController owns everything new: VGGTWrapper (already frozen
+        # internally), InitialQueryEmbed, and 4 independent DeformableTemporalBlock
+        # instances (each with its own DeformHeadMu/DeformHeadR -- see that file's
+        # module docstring for the verified Stage A precedent this follows). Exposed
+        # as `pool` purely so the existing 7-tuple/module-list plumbing
+        # (evaluate_heldout's train()/eval() sweep, scripts/train_stage1.py's
+        # optimizer param groups) keeps working unchanged elsewhere.
+        pool = VGGTDeformableController(
+            vggt_wrapper, query_dim=VGGT_QUERY_DIM, K=VGGT_K, num_blocks=VGGT_NUM_BLOCKS,
+            hidden_dim=128, d_bound=VGGT_D_BOUND, semantic_dim=17,
+        ).cuda()
+        # No shared top-level grid/deform-heads in this design (each block owns its
+        # own) -- these three are unused placeholders, present only so every OTHER
+        # consumer of build_temporal_module()'s 7-tuple keeps working unchanged.
+        # deform_one_step's USE_VGGT_DEFORMABLE branch never calls any of them.
+        hypernet = nn.Identity().cuda()
+        deform_mu = nn.Identity().cuda()
+        deform_r = nn.Identity().cuda()
+    elif USE_SPATIAL_STEP5:
         pool = SpatialPoolFeatures(
             img_channels=128, dpt_channels=112, num_levels=4,
             out_channels=SPATIAL_POOL_OUT_CHANNELS, k_subsamples=SPATIAL_K_SUBSAMPLES,
@@ -136,15 +183,17 @@ def build_temporal_module():
             panorama_bins=SPATIAL_PANORAMA_BINS, map2d_size=SPATIAL_MAP2D_SIZE,
             seed_channels=SPATIAL_SEED_CHANNELS,
         ).cuda()
+        deform_mu = DeformHeadMu(in_dim=3 * 2 * 4, hidden_dim=128).cuda()
+        deform_r = DeformHeadR(in_dim=3 * 2 * 4, hidden_dim=128, max_angle_rad=0.3).cuda()
     else:
         pool = PoolFeatures(img_channels=128, dpt_channels=112, num_levels=4, in_dim=128).cuda()
         hypernet = ConvHyperNet(in_dim=128, grid_feat_dim=4, resolutions=(8, 16, 32),
                                  seed_res=4, seed_channels=64).cuda()
+        # grid_feat_dim=4 -> in_dim=3*2*4=24 (query_motion_grid_pe_coordinate's two
+        # samples -- sin, cos -- per level), same for both non-VGGT branches.
+        deform_mu = DeformHeadMu(in_dim=3 * 2 * 4, hidden_dim=128).cuda()
+        deform_r = DeformHeadR(in_dim=3 * 2 * 4, hidden_dim=128, max_angle_rad=0.3).cuda()
 
-    # grid_feat_dim=4 either way -> in_dim=3*2*4=24 either way (query_motion_grid_pe_coordinate's
-    # two samples -- sin, cos -- per level), completely unaffected by USE_SPATIAL_STEP5.
-    deform_mu = DeformHeadMu(in_dim=3 * 2 * 4, hidden_dim=128).cuda()
-    deform_r = DeformHeadR(in_dim=3 * 2 * 4, hidden_dim=128, max_angle_rad=0.3).cuda()
     feature_dropout = nn.Dropout(p=DROPOUT_P).cuda()
     z_dropout = nn.Dropout(p=DROPOUT_P).cuda()
     spawn_head = None
@@ -176,32 +225,63 @@ def get_real_g0(segmentor, cuda0):
 def deform_one_step(g_prev, encoder, pool, hypernet, deform_mu, deform_r,
                      feature_dropout, z_dropout, cuda_prev, cuda_curr,
                      spawn_head=None, no_grad_encoder=True, return_deltas=False):
-    ctx = torch.no_grad() if no_grad_encoder else torch.enable_grad()
-    with ctx:
-        ms_img_feats_prev, _dpt_dist_prev, out_dpt_multiscale_prev = encoder.encode(
-            cuda_prev["imgs"], cuda_prev["dpt"], cuda_prev["metas"]
-        )
-        ms_img_feats_curr, _dpt_dist_curr, out_dpt_multiscale_curr = encoder.encode(
-            cuda_curr["imgs"], cuda_curr["dpt"], cuda_curr["metas"]
-        )
-
-    if USE_SPATIAL_STEP5:
-        panorama_prev = pool(ms_img_feats_prev, out_dpt_multiscale_prev)  # (B, C_pool, P)
-        panorama_curr = pool(ms_img_feats_curr, out_dpt_multiscale_curr)  # (B, C_pool, P)
-        panorama_diff = panorama_curr - panorama_prev
-        pooled_delta = feature_dropout(
-            torch.cat([panorama_curr, panorama_prev, panorama_diff], dim=1)
-        )  # (B, 3*C_pool, P)
-    else:
-        pooled_prev = pool(ms_img_feats_prev, out_dpt_multiscale_prev)
-        pooled_curr = pool(ms_img_feats_curr, out_dpt_multiscale_curr)
-        pooled_delta = feature_dropout(pooled_curr - pooled_prev)
-
-    grids = hypernet(pooled_delta)
     means_flat = g_prev.means.squeeze(0) if g_prev.means.dim() == 3 else g_prev.means
-    z = z_dropout(query_motion_grid_pe_coordinate(means_flat, grids, PC_RANGE))
-    delta_mu = deform_mu(z)
-    delta_r = deform_r(z)
+
+    # Computed unconditionally, early: USE_VGGT_DEFORMABLE needs this to project
+    # each Gaussian into frame t's real cameras BEFORE delta_mu/delta_r exist yet
+    # (each block refines its own frame-t anchor using the running estimate) --
+    # unlike the older pool/hypernet chain, which only needed this later, inside the
+    # USE_EGO_COMPENSATION branch, for the update rule alone.
+    pose_prev = cuda_prev["metas"]["lidar2global"][0]
+    pose_curr = cuda_curr["metas"]["lidar2global"][0]
+    relative_transform = compute_relative_transform(pose_prev, pose_curr)
+
+    grids = None
+    pooled_delta = None
+    if USE_VGGT_DEFORMABLE:
+        # VGGT_DEFORMABLE_DESIGN.md: entirely bypasses encoder.encode() (the
+        # ResNet+FPN CurrentFrameEncoder) -- this path's features come exclusively
+        # from VGGTWrapper on cuda_*["vggt_imgs"] inside VGGTDeformableController's
+        # own forward(), so calling the old encoder here would be pure wasted
+        # compute/memory. `pool` is a VGGTDeformableController (see
+        # build_temporal_module); hypernet/deform_mu/deform_r are unused
+        # placeholders for this branch (each of the controller's 4 internal blocks
+        # owns its own DeformHeadMu/DeformHeadR -- see deformable_temporal_block.py).
+        rot_flat = g_prev.rotations.squeeze(0) if g_prev.rotations.dim() == 3 else g_prev.rotations
+        scale_flat = g_prev.scales.squeeze(0) if g_prev.scales.dim() == 3 else g_prev.scales
+        opa_flat = g_prev.opacities.squeeze(0) if g_prev.opacities.dim() == 3 else g_prev.opacities
+        sem_flat = g_prev.semantics.squeeze(0) if g_prev.semantics.dim() == 3 else g_prev.semantics
+
+        delta_mu, delta_r = pool(
+            means_flat, rot_flat, scale_flat, opa_flat, sem_flat,
+            relative_transform, cuda_prev, cuda_curr,
+        )
+    else:
+        ctx = torch.no_grad() if no_grad_encoder else torch.enable_grad()
+        with ctx:
+            ms_img_feats_prev, _dpt_dist_prev, out_dpt_multiscale_prev = encoder.encode(
+                cuda_prev["imgs"], cuda_prev["dpt"], cuda_prev["metas"]
+            )
+            ms_img_feats_curr, _dpt_dist_curr, out_dpt_multiscale_curr = encoder.encode(
+                cuda_curr["imgs"], cuda_curr["dpt"], cuda_curr["metas"]
+            )
+
+        if USE_SPATIAL_STEP5:
+            panorama_prev = pool(ms_img_feats_prev, out_dpt_multiscale_prev)  # (B, C_pool, P)
+            panorama_curr = pool(ms_img_feats_curr, out_dpt_multiscale_curr)  # (B, C_pool, P)
+            panorama_diff = panorama_curr - panorama_prev
+            pooled_delta = feature_dropout(
+                torch.cat([panorama_curr, panorama_prev, panorama_diff], dim=1)
+            )  # (B, 3*C_pool, P)
+        else:
+            pooled_prev = pool(ms_img_feats_prev, out_dpt_multiscale_prev)
+            pooled_curr = pool(ms_img_feats_curr, out_dpt_multiscale_curr)
+            pooled_delta = feature_dropout(pooled_curr - pooled_prev)
+
+        grids = hypernet(pooled_delta)
+        z = z_dropout(query_motion_grid_pe_coordinate(means_flat, grids, PC_RANGE))
+        delta_mu = deform_mu(z)
+        delta_r = deform_r(z)
 
     if not USE_EGO_COMPENSATION:
         g_t = apply_update_rule(g_prev, delta_mu, delta_r, pc_range=PC_RANGE)
@@ -209,12 +289,16 @@ def deform_one_step(g_prev, encoder, pool, hypernet, deform_mu, deform_r,
             return g_t, delta_mu, delta_r
         return g_t
 
-    pose_prev = cuda_prev["metas"]["lidar2global"][0]
-    pose_curr = cuda_curr["metas"]["lidar2global"][0]
-    relative_transform = compute_relative_transform(pose_prev, pose_curr)
-
     spawn_offset = spawn_opacity = spawn_semantics = None
     if spawn_head is not None:
+        if USE_VGGT_DEFORMABLE:
+            raise NotImplementedError(
+                "SpawnHead assumes a queryable dense motion grid (query_motion_grid_"
+                "pe_coordinate on candidate positions) -- the VGGT-deformable path "
+                "has no grid to query. USE_SPAWN_HEAD/USE_EGO_COMPENSATION + "
+                "USE_VGGT_DEFORMABLE together is not yet supported; this combination "
+                "needs its own design, not a silent fallback."
+            )
         wrapped_base, _out_of_range = compute_spawn_candidate_positions(
             means_flat, delta_mu, relative_transform, PC_RANGE
         )

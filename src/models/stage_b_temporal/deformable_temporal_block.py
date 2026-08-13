@@ -71,6 +71,7 @@ final step happens in the caller (apply_update_rule), not in this file.
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from torch.utils.checkpoint import checkpoint
 
 # Side effect only: puts GF3D_ROOT on sys.path (and chdir's into it) so the plain
 # `from model...` import inside forward() below resolves. Matches
@@ -320,10 +321,11 @@ class VGGTDeformableController(nn.Module):
         image_wh_curr = cuda_curr["metas"]["vggt_image_wh"]
 
         for block in self.blocks:
-            delta_mu, delta_r, q = block(
-                means_flat, delta_mu, delta_r, q, relative_transform,
+            delta_mu, delta_r, q = checkpoint(
+                block, means_flat, delta_mu, delta_r, q, relative_transform,
                 projection_mat_prev, image_wh_prev, feat_prev_map,
                 projection_mat_curr, image_wh_curr, feat_curr_map,
+                use_reentrant=False,
             )
 
         return delta_mu, delta_r

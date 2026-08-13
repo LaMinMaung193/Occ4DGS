@@ -264,3 +264,66 @@ class DeformableTemporalBlock(nn.Module):
         q_new = q_prev + self.query_update_mlp(z)
 
         return delta_mu_new, delta_r_new, q_new
+
+
+class VGGTDeformableController(nn.Module):
+    """
+    Ties VGGTWrapper + InitialQueryEmbed + N_BLOCKS independent DeformableTemporalBlock
+    instances together into a single callable, matching this project's established
+    "one module, one forward() call, ready-to-use delta_mu/delta_r" pattern (the same
+    role DirectProjectionSampler plays in Option D, just internally iterative here
+    instead of a single pass).
+    """
+
+    def __init__(self, vggt_wrapper, query_dim=128, K=4, num_blocks=4, hidden_dim=128,
+                 d_bound=(2.0, 58.0), semantic_dim=17,
+                 max_disp_xyz=(4.0, 4.0, 1.0), max_angle_rad=0.3):
+        super().__init__()
+        self.vggt = vggt_wrapper
+        self.initial_embed = InitialQueryEmbed(query_dim=query_dim, hidden_dim=hidden_dim,
+                                                semantic_dim=semantic_dim)
+        self.blocks = nn.ModuleList([
+            DeformableTemporalBlock(feat_dim=vggt_wrapper.feat_dim, query_dim=query_dim,
+                                     K=K, hidden_dim=hidden_dim, d_bound=d_bound,
+                                     max_disp_xyz=max_disp_xyz, max_angle_rad=max_angle_rad)
+            for _ in range(num_blocks)
+        ])
+
+    def forward(self, means_flat, rotations_flat, scales_flat, opacities_flat,
+                semantics_flat, relative_transform, cuda_prev, cuda_curr):
+        """
+        means_flat etc.: (N, *), unbatched -- G_{t-1}'s own fields.
+        cuda_prev/cuda_curr: the SAME dicts deform_one_step already has -- reads
+            cuda_*["vggt_imgs"] and cuda_*["metas"]["projection_mat"] /
+            cuda_*["metas"]["vggt_image_wh"] directly. projection_mat itself is
+            IDENTICAL between the ResNet and VGGT paths (padding, not resizing,
+            preserves every real pixel's exact original coordinate -- Liam's
+            confirmed decision); only image_wh (the padded canvas size used for
+            [0,1] normalization) differs, hence the separate vggt_image_wh and no
+            separate vggt_projection_mat.
+
+        Returns: delta_mu, delta_r (N,3)/(N,4), the block-4 running totals -- ready
+            for apply_update_rule / apply_ego_compensated_update_rule, the same
+            contract deform_mu(z)/deform_r(z) provide in every other branch.
+        """
+        feat_prev_map, feat_curr_map = self.vggt(cuda_prev["vggt_imgs"], cuda_curr["vggt_imgs"])
+
+        q = self.initial_embed(means_flat, rotations_flat, scales_flat, opacities_flat, semantics_flat)
+        N = means_flat.shape[0]
+        delta_mu = torch.zeros(N, 3, device=means_flat.device, dtype=means_flat.dtype)
+        delta_r = torch.zeros(N, 4, device=means_flat.device, dtype=means_flat.dtype)
+        delta_r[:, 0] = 1.0  # identity quaternion
+
+        projection_mat_prev = cuda_prev["metas"]["projection_mat"]
+        projection_mat_curr = cuda_curr["metas"]["projection_mat"]
+        image_wh_prev = cuda_prev["metas"]["vggt_image_wh"]
+        image_wh_curr = cuda_curr["metas"]["vggt_image_wh"]
+
+        for block in self.blocks:
+            delta_mu, delta_r, q = block(
+                means_flat, delta_mu, delta_r, q, relative_transform,
+                projection_mat_prev, image_wh_prev, feat_prev_map,
+                projection_mat_curr, image_wh_curr, feat_curr_map,
+            )
+
+        return delta_mu, delta_r

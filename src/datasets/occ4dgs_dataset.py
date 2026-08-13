@@ -197,6 +197,16 @@ class Occ4DGSDataset(Dataset):
             "ego2global": input_dict["ego2global"],
             "lidar2global": input_dict["lidar2global"],
         }
+        # VGGT_DEFORMABLE_DESIGN.md: PadRawImagesForVGGT (gf3d_pipeline.py) adds these
+        # -- a separate, own-padding (multiple of 14), non-ImageNet-normalized image
+        # stream for VGGT, distinct from "img"/"image_wh" above (32-padded, ImageNet-
+        # normalized, for the existing ResNet/FPN backbone). Optional-style guard
+        # (matches the points/img_filename/dpt pattern below) even though the
+        # pipeline always produces these when PadRawImagesForVGGT is present --
+        # keeps this dataset usable with pipelines that don't include it.
+        for k in ("vggt_img", "vggt_image_wh"):
+            if k in input_dict:
+                return_dict[k] = input_dict[k]
         for k in ("points", "img_filename", "dpt", "occ3d_mask_camera", "pts_filename"):
             if k in input_dict:
                 return_dict[k] = input_dict[k]

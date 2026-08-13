@@ -96,6 +96,11 @@ def to_cuda(batch):
     out = {"imgs": batch["imgs"].cuda(), "points": [t.cuda() for t in batch["points"]]}
     out["metas"] = {k: v.cuda() for k, v in batch["metas"].items()}
     out["dpt"] = batch["dpt"].cuda() if batch["dpt"] is not None else None
+    # VGGT_DEFORMABLE_DESIGN.md: metas["vggt_image_wh"] already moves to cuda via the
+    # generic metas dict-comprehension above; vggt_imgs needs its own line, matching
+    # the dpt pattern (also optional -- None when the pipeline doesn't include
+    # PadRawImagesForVGGT, e.g. any dataset/pipeline built before this change).
+    out["vggt_imgs"] = batch.get("vggt_imgs").cuda() if batch.get("vggt_imgs") is not None else None
     return out
 
 

@@ -51,6 +51,19 @@ this wrapper's OWN code (not VGGT's internals) could get wrong.
 import torch
 import torch.nn as nn
 
+# Side effect only: puts VGGT's own repo root on sys.path, matching how
+# src/datasets/gf3d_pipeline.py does the same for GF3D_ROOT. Real bug found on the
+# lab machine (Gate 1's ModuleNotFoundError: No module named 'vggt') -- this file's
+# real (non-test-injection) __init__ path does `from vggt.models.vggt import VGGT`
+# with nothing, until now, ensuring `vggt` was actually importable; the test file
+# had its own local sys.path setup, but that never covered the production path.
+import os
+import sys
+
+VGGT_ROOT = os.path.expanduser("~/Documents/min/vggt")
+if VGGT_ROOT not in sys.path:
+    sys.path.insert(0, VGGT_ROOT)
+
 
 class VGGTWrapper(nn.Module):
     """

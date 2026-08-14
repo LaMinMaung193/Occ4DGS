@@ -15,6 +15,7 @@ alone. Revisit the chdir side effect as its own separate, focused fix later.
 """
 import os
 import sys
+import cv2
 import mmcv
 import numpy as np
 import torch
@@ -54,38 +55,75 @@ class PadRawImagesForVGGT:
         that point -- the BGR->RGB flip only happens later, inside
         NormalizeMultiviewImage itself).
 
+    DOWNSAMPLE FIX (found on real training, not anticipated by the design doc): the
+    native padded resolution (910x1610, 65x115=7475 patches/frame) is ~5.5x more
+    patches per frame than VGGT-1B's own tested/default scale (img_size=518,
+    37x37=1369 patches -- confirmed against vggt/models/aggregator.py's real default,
+    and against the README's own "VGGT typically reconstructs a scene in less than 1
+    second" claim). Self-attention cost scales quadratically with sequence length, so
+    feeding 12 frames (6 cams x 2 timesteps, Section 2's "both frames together"
+    decision) at native resolution gave a ~90,000-token global-attention sequence --
+    confirmed via real training on the lab machine: 100% GPU utilization (genuine
+    compute, not a hang), ~22 minutes per optimizer step, projecting to ~9 days for
+    one Gate 2 (n=3) run.
+
+    Fix: downsample AFTER padding, to (VGGT_TARGET_H, VGGT_TARGET_W) -- landing at
+    28x50=1400 patches/frame, close to VGGT's own native 1369. This does NOT reopen
+    the resize-vs-pad distortion concern from the original decision: that concern was
+    about a slightly non-uniform resize at NATIVE resolution, awkwardly hitting an
+    odd multiple-of-14 target. This is a clean, separate step on an ALREADY correctly
+    padded canvas -- and critically, project_points_3d's [0,1] normalization divides
+    x by width and y by height INDEPENDENTLY (not a single combined "scale"), so
+    geometric correctness holds exactly regardless of whether the H and W downsample
+    factors match each other (they happen to be close here -- 2.32 vs 2.30 -- but
+    that's incidental, not required), as long as vggt_image_wh is set to the TRUE
+    final (post-downsample) resolution, which it is, below.
+
     Must run in build_pipeline() AFTER LoadMultiViewImageFromFiles (needs
     results['img'] populated) and BEFORE NormalizeMultiviewImage (needs the raw,
     un-normalized, still-BGR pixel values).
 
     Adds:
-        results['vggt_img']: list of (H_pad, W_pad, 3) float32 arrays, RGB order,
-            [0,1] scale, padded (zero-fill, bottom/right) to a multiple of
-            size_divisor. NOT ImageNet-normalized.
-        results['vggt_image_wh']: (num_cams, 2) float32 array of [W_pad, H_pad] per
-            camera -- the padded resolution VGGT's own dense features actually span,
-            for project_points_3d's normalization. Deliberately NOT the same array as
-            results['image_wh'] (which reflects the 32-padded shape for the ResNet
-            path) -- these are two different padded resolutions for two different
-            networks and must not be conflated (VGGT_DEFORMABLE_DESIGN.md's own
-            consistency note).
+        results['vggt_img']: list of (VGGT_TARGET_H, VGGT_TARGET_W, 3) float32
+            arrays, RGB order, [0,1] scale, padded then downsampled. NOT
+            ImageNet-normalized.
+        results['vggt_image_wh']: (num_cams, 2) float32 array of
+            [VGGT_TARGET_W, VGGT_TARGET_H] per camera -- the TRUE final resolution
+            VGGT's own dense features actually span, for project_points_3d's
+            normalization. Deliberately NOT the same array as results['image_wh']
+            (32-padded, native resolution, for the ResNet path) -- these are two
+            different resolutions for two different networks and must not be
+            conflated (VGGT_DEFORMABLE_DESIGN.md's own consistency note).
     """
 
-    def __init__(self, size_divisor=14):
+    def __init__(self, size_divisor=14, target_h=392, target_w=700):
         self.size_divisor = size_divisor
+        # 28*14=392, 50*14=700 -- both exact multiples of size_divisor (required for
+        # VGGT's patch embedding), landing at 28*50=1400 patches/frame, close to
+        # VGGT-1B's own native 37*37=1369 -- see class docstring for the full
+        # derivation and why H/W downsample factors don't need to match each other.
+        assert target_h % size_divisor == 0 and target_w % size_divisor == 0, (
+            f"target_h={target_h}/target_w={target_w} must both be exact multiples "
+            f"of size_divisor={size_divisor} -- VGGT's patch embedding requires this."
+        )
+        self.target_h = target_h
+        self.target_w = target_w
 
     def __call__(self, results):
         raw_bgr_views = results["img"]  # list of (H,W,3) float32, BGR, un-normalized
         vggt_views = []
-        vggt_shapes = []
         for img in raw_bgr_views:
             rgb_01 = img[..., ::-1].astype(np.float32) / 255.0  # BGR->RGB, scale to [0,1]
             padded = mmcv.impad_to_multiple(rgb_01, self.size_divisor, pad_val=0.0)
-            vggt_views.append(padded)
-            vggt_shapes.append(padded.shape)  # (H_pad, W_pad, 3)
+            # INTER_AREA: the standard, recommended OpenCV interpolation for
+            # DOWNSAMPLING specifically (better anti-aliasing than bilinear when
+            # shrinking) -- this is real image content, not a discrete label map.
+            downsampled = cv2.resize(padded, (self.target_w, self.target_h),
+                                      interpolation=cv2.INTER_AREA)
+            vggt_views.append(downsampled)
         results["vggt_img"] = vggt_views
         results["vggt_image_wh"] = np.ascontiguousarray(
-            np.array(vggt_shapes, dtype=np.float32)[:, :2][:, ::-1]  # (H,W,3) -> (W,H)
+            np.array([[float(self.target_w), float(self.target_h)]] * len(vggt_views), dtype=np.float32)
         )
         return results
 

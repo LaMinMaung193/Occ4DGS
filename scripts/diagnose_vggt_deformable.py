@@ -94,16 +94,19 @@ def main():
     print("=" * 70)
     image_wh_prev = cuda0["metas"]["vggt_image_wh"]
     image_wh_curr = cuda1["metas"]["vggt_image_wh"]
-    print(f"metas['vggt_image_wh'][0,0] = {image_wh_prev[0, 0].tolist()}  (expect [700.0, 392.0])")
+    print(f"metas['vggt_image_wh'][0,0] = {image_wh_prev[0, 0].tolist()}  (expect [1610.0, 910.0] -- "
+          f"NATIVE-PADDED scale, matching projection_mat's own coordinate system, "
+          f"NOT the downsampled tensor resolution -- these are deliberately different "
+          f"since the image_wh_bug fix)")
     _, N_cam, _, H_actual, W_actual = vggt_imgs_prev.shape
-    print(f"vggt_imgs actual spatial shape: ({H_actual}, {W_actual})  (expect (392, 700))")
-    assert image_wh_prev[0, 0, 0].item() == W_actual and image_wh_prev[0, 0, 1].item() == H_actual, (
-        f"MISMATCH: metas['vggt_image_wh']={image_wh_prev[0,0].tolist()} does not match "
-        f"the actual vggt_imgs tensor shape ({H_actual},{W_actual}) -- this IS a real bug "
-        f"if it fires"
+    print(f"vggt_imgs actual (downsampled) spatial shape: ({H_actual}, {W_actual})  (expect (392, 700))")
+    assert image_wh_prev[0, 0, 0].item() == 1610.0 and image_wh_prev[0, 0, 1].item() == 910.0, (
+        f"metas['vggt_image_wh']={image_wh_prev[0,0].tolist()} is NOT the native-padded "
+        f"(1610,910) resolution -- the image_wh_bug fix may not be applied"
     )
-    print("[CONFIRMED] metas['vggt_image_wh'] exactly matches the real vggt_imgs tensor's "
-          "actual (H,W) -- no stale/mismatched resolution")
+    print("[CONFIRMED] metas['vggt_image_wh'] is correctly at NATIVE-PADDED scale "
+          "(1610,910) -- matching projection_mat's own coordinate system, distinct "
+          "from vggt_imgs' actual downsampled tensor shape, per the image_wh_bug fix")
 
     with torch.no_grad():
         feat_prev_map, feat_curr_map = pool.vggt(vggt_imgs_prev, vggt_imgs_curr)

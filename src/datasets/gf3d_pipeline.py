@@ -112,9 +112,11 @@ class PadRawImagesForVGGT:
     def __call__(self, results):
         raw_bgr_views = results["img"]  # list of (H,W,3) float32, BGR, un-normalized
         vggt_views = []
+        native_padded_h, native_padded_w = None, None
         for img in raw_bgr_views:
             rgb_01 = img[..., ::-1].astype(np.float32) / 255.0  # BGR->RGB, scale to [0,1]
             padded = mmcv.impad_to_multiple(rgb_01, self.size_divisor, pad_val=0.0)
+            native_padded_h, native_padded_w = padded.shape[:2]  # BEFORE downsampling -- see below
             # INTER_AREA: the standard, recommended OpenCV interpolation for
             # DOWNSAMPLING specifically (better anti-aliasing than bilinear when
             # shrinking) -- this is real image content, not a discrete label map.
@@ -122,8 +124,22 @@ class PadRawImagesForVGGT:
                                       interpolation=cv2.INTER_AREA)
             vggt_views.append(downsampled)
         results["vggt_img"] = vggt_views
+        # BUG FIX (found via real training -- an ~84-86% fallback-embedding usage
+        # rate, traced to this exact line): vggt_image_wh must reflect the NATIVE-
+        # PADDED resolution (pre-downsample, e.g. 1610x910), NOT the downsampled
+        # target (700x392) -- project_points_3d's [0,1] normalization divides
+        # projection_mat's own pixel-coordinate output by image_wh, and
+        # projection_mat ALWAYS outputs native-scale pixel coordinates (it is never
+        # touched by padding or downsampling). Dividing native-scale coordinates by
+        # a downsampled width/height gives values far outside [0,1] for almost
+        # every real point, which is exactly what caused the near-total fallback
+        # rate. grid_sample itself never receives image_wh at all -- it only needs
+        # the [-1,1] grid coordinate (resolution-independent by construction) and
+        # the actual tensor's own shape, which it already has -- so downsampling
+        # the IMAGE TENSOR while keeping image_wh at native-padded scale is
+        # correct and was the original intent, just not what got implemented.
         results["vggt_image_wh"] = np.ascontiguousarray(
-            np.array([[float(self.target_w), float(self.target_h)]] * len(vggt_views), dtype=np.float32)
+            np.array([[float(native_padded_w), float(native_padded_h)]] * len(vggt_views), dtype=np.float32)
         )
         return results
 

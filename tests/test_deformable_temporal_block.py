@@ -90,11 +90,14 @@ def main():
     assert q1.shape == (N, query_dim)
     print("[PASS] DeformableTemporalBlock output shapes correct")
 
-    # --- At init, offsets/attn are zero/uniform, so this reduces to the same
-    # camera-ablation correctness check as Option D's DirectProjectionSampler:
-    # perturbing the camera Gaussian A (means[0], in front of CAM_0) actually
-    # projects into must change its sampled feature; perturbing CAM_1 (which it does
-    # NOT project into) must not. ---
+    # --- Offsets start SMALL (std=0.01 random, not exactly zero -- see the
+    # symmetry-breaking fix in deformable_temporal_block.py) and attn starts
+    # uniform, so this still closely reduces to the same camera-ablation
+    # correctness check as Option D's DirectProjectionSampler: perturbing the
+    # camera Gaussian A (means[0], in front of CAM_0) actually projects into must
+    # change its sampled feature; perturbing CAM_1 (which it does NOT project into)
+    # must not -- unaffected by the offset fix, since CAM_1's contribution is
+    # masked out entirely (weight=0) regardless of offset magnitude. ---
     feat_prev_ablated = feat_prev_map.clone()
     feat_prev_ablated[:, 0] = 0.0
     with torch.no_grad():
@@ -120,7 +123,7 @@ def main():
     print(f"Ablating CAM_1 (a camera Gaussian A does NOT project into):")
     print(f"  change in Gaussian A's delta_mu: {diff_unseen_cam:.6f}")
     assert diff_unseen_cam < 1e-6, "ablating a non-observing camera must not change the output"
-    print("[PASS] geometric correctness holds at init (offsets start at zero, "
+    print("[PASS] geometric correctness holds (small-random-offset init, "
           "reducing to the same camera-ablation check as Option D)")
 
     # --- THE key new-mechanism check: frame t-1's anchor must be FIXED across

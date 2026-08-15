@@ -126,12 +126,39 @@ class DeformableTemporalBlock(nn.Module):
             nn.Linear(query_dim, hidden_dim), nn.ReLU(inplace=True),
             nn.Linear(hidden_dim, K * 2),
         )
-        # Zero-init final layer -> offsets start at exactly 0 (sampling starts
-        # exactly AT the anchor at init) -- matches this project's established
-        # preference for safe/bounded initialization (DeformHeadMu/R's own
-        # zero-motion-at-init tanh design).
-        nn.init.zeros_(self.offset_mlp[-1].weight)
-        nn.init.zeros_(self.offset_mlp[-1].bias)
+        # SYMMETRY-BREAKING FIX (found via real training -- attn_mlp showed EXACTLY
+        # 0.0 gradient, both layers, across all 4 blocks, confirmed on a real trained
+        # checkpoint via scripts/diagnose_vggt_attn_gradient.py): the original
+        # zero-init here (nn.init.zeros_ on both weight and bias) meant ALL K output
+        # slices started at the IDENTICAL value (0,0) -- and since all K slices share
+        # the same hidden-layer input, identical initial weights receive IDENTICAL
+        # gradients at every step, so standard gradient descent has no mechanism to
+        # ever break that symmetry: the K offsets move together in lockstep forever,
+        # never diverging. Verified this precisely and empirically (not just
+        # theoretically) via a standalone synthetic test: even 50 steps of a loss
+        # SPECIFICALLY REWARDING the K offsets diverging left them exactly,
+        # bit-for-bit identical throughout. Since all K sampled feature vectors then
+        # stay identical to each other at every step, weighting them differently vs.
+        # identically has zero effect on the output -- which is exactly why
+        # attn_mlp's gradient was mathematically forced to exactly 0 the whole time,
+        # not a bug in attn_mlp itself.
+        #
+        # Fix: small INDEPENDENT random init (std=0.01) instead of exact zero --
+        # breaks the K-symmetry (each of the K slices now starts at a different,
+        # small value) while keeping the initial offset magnitude small (~0.07 max
+        # in the synthetic verification), preserving the original "safe, near-anchor
+        # start" intent, just not via exact, symmetry-locking zero. Re-verified with
+        # the same synthetic test: offsets successfully diverge (variance ~9.7 after
+        # 50 steps, vs exactly 0 before this fix).
+        #
+        # attn_mlp's own zero-init (below) does NOT need this same fix -- its
+        # symmetry is not self-reinforcing the way offset_mlp's was: once offsets
+        # diverge (with this fix), the K sampled values genuinely differ, so
+        # attn_mlp naturally receives differentiated gradient per K-slice from that
+        # point on and can learn normally. query_update_mlp likewise doesn't have
+        # this K-way repeated substructure at all, so it isn't at risk either.
+        nn.init.normal_(self.offset_mlp[-1].weight, std=0.01)
+        nn.init.normal_(self.offset_mlp[-1].bias, std=0.01)
 
         self.attn_mlp = nn.Sequential(
             nn.Linear(query_dim, hidden_dim), nn.ReLU(inplace=True),

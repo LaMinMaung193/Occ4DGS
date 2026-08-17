@@ -113,7 +113,8 @@ class DeformableTemporalBlock(nn.Module):
     """
 
     def __init__(self, feat_dim, query_dim=128, K=4, hidden_dim=128,
-                 d_bound=(2.0, 58.0), max_disp_xyz=(4.0, 4.0, 1.0), max_angle_rad=0.3):
+                 d_bound=(2.0, 58.0), max_disp_xyz=(4.0, 4.0, 1.0), max_angle_rad=0.3,
+                 dropout_p=0.2):
         super().__init__()
         self.feat_dim = feat_dim
         self.query_dim = query_dim
@@ -184,6 +185,23 @@ class DeformableTemporalBlock(nn.Module):
         # Zero-init -> query starts unchanged at init (q^(l) = q^(l-1) + 0).
         nn.init.zeros_(self.query_update_mlp[-1].weight)
         nn.init.zeros_(self.query_update_mlp[-1].bias)
+
+        # REGULARIZATION GAP FIX (found via real training -- n=3 and n=8 both showed
+        # the identical overfitting signature: training loss monotonically improving
+        # for all 20 epochs while held-out delta peaked early (epoch 4-6) and never
+        # recovered, oscillating worse for the remainder. Confirmed this ISN'T a
+        # data-quantity problem -- n=8 (2.7x more clips) reproduced the exact same
+        # shape, timing, and magnitude as n=3, ruling out "just needs more data" as
+        # the primary explanation. This left a real, previously-unflagged gap: EVERY
+        # other architecture in this project applies dropout regularization
+        # (feature_dropout/z_dropout in stage_b_engine.py) -- this mechanism had NONE,
+        # anywhere, despite carrying far more capacity (z_dim=6272 here vs. 24-720
+        # elsewhere) than anything tried before. Adding z_dropout here, matching the
+        # exact same DROPOUT_P=0.2 value and "dropout on z right before the
+        # deformation heads consume it" placement used everywhere else in this
+        # project, as a single, isolated, controlled next step (not combined with
+        # the n=8 data-quantity change, to keep this comparison interpretable).
+        self.z_dropout = nn.Dropout(p=dropout_p)
 
     def _sample_one_frame(self, anchor_xy, offsets, attn_weights, bev_mask, feat_map):
         """
@@ -286,6 +304,7 @@ class DeformableTemporalBlock(nn.Module):
         f_curr = self._sample_one_frame(anchor_curr, offsets, attn_weights, mask_curr, feat_curr_map[0])
 
         z = torch.cat([f_prev, f_curr, f_curr - f_prev, q_prev], dim=-1)
+        z = self.z_dropout(z)
 
         delta_mu_new = delta_mu_prev + self.deform_mu(z)
         delta_r_new = quat_multiply(delta_r_prev, self.deform_r(z))  # NOT normalized here, see module docstring
@@ -305,7 +324,7 @@ class VGGTDeformableController(nn.Module):
 
     def __init__(self, vggt_wrapper, query_dim=128, K=4, num_blocks=4, hidden_dim=128,
                  d_bound=(2.0, 58.0), semantic_dim=17,
-                 max_disp_xyz=(4.0, 4.0, 1.0), max_angle_rad=0.3):
+                 max_disp_xyz=(4.0, 4.0, 1.0), max_angle_rad=0.3, dropout_p=0.2):
         super().__init__()
         self.vggt = vggt_wrapper
         self.initial_embed = InitialQueryEmbed(query_dim=query_dim, hidden_dim=hidden_dim,
@@ -313,7 +332,8 @@ class VGGTDeformableController(nn.Module):
         self.blocks = nn.ModuleList([
             DeformableTemporalBlock(feat_dim=vggt_wrapper.feat_dim, query_dim=query_dim,
                                      K=K, hidden_dim=hidden_dim, d_bound=d_bound,
-                                     max_disp_xyz=max_disp_xyz, max_angle_rad=max_angle_rad)
+                                     max_disp_xyz=max_disp_xyz, max_angle_rad=max_angle_rad,
+                                     dropout_p=dropout_p)
             for _ in range(num_blocks)
         ])
 

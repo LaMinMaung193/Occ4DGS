@@ -101,7 +101,7 @@ SPATIAL_SEED_CHANNELS = 64
 # exclusive with USE_SPATIAL_STEP5 (one replaces the other's entire chain). New,
 # untested branch -- default False until Gate 1 confirms it runs end-to-end on real
 # data.
-USE_VGGT_DEFORMABLE = False
+USE_VGGT_DEFORMABLE = True
 VGGT_QUERY_DIM = 128
 VGGT_K = 4  # Liam's confirmed decision -- matches Deformable DETR/DFA3D's magnitude
 VGGT_NUM_BLOCKS = 4  # matches Stage A's own 4-decoder-block precedent
@@ -162,7 +162,7 @@ def build_temporal_module():
         # optimizer param groups) keeps working unchanged elsewhere.
         pool = VGGTDeformableController(
             vggt_wrapper, query_dim=VGGT_QUERY_DIM, K=VGGT_K, num_blocks=VGGT_NUM_BLOCKS,
-            hidden_dim=128, d_bound=VGGT_D_BOUND, semantic_dim=17,
+            hidden_dim=128, d_bound=VGGT_D_BOUND, semantic_dim=17, dropout_p=DROPOUT_P,
         ).cuda()
         # No shared top-level grid/deform-heads in this design (each block owns its
         # own) -- these three are unused placeholders, present only so every OTHER

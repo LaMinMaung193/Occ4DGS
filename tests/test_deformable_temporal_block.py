@@ -72,6 +72,14 @@ def main():
     # --- DeformableTemporalBlock shape check ---
     block = DeformableTemporalBlock(feat_dim=C, query_dim=query_dim, K=4, hidden_dim=32,
                                      d_bound=(2.0, 58.0))
+    # eval() disables z_dropout -- required for this test's deterministic-comparison
+    # checks below (ablation/perturbation tests assume identical inputs produce
+    # identical outputs across separate forward calls; with dropout active, two
+    # calls get two different random masks regardless of input, which would break
+    # that assumption for reasons having nothing to do with the thing being tested).
+    # Gradient flow into z_dropout itself isn't a concern -- nn.Dropout has no
+    # learnable parameters to verify.
+    block.eval()
     delta_mu0 = torch.zeros(N, 3)
     delta_r0 = torch.zeros(N, 4); delta_r0[:, 0] = 1.0
     identity_T = torch.eye(4)

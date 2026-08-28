@@ -19,6 +19,17 @@ writing and professor check-ins.
 | 2026-07-29-gt-motion-and-ego-compensation | 5 | 6400 | 2 | Stage B | 1e-4 AdamW | — | — | — | GT motion 60-84% of voxels, dominated by ego motion (not object motion); ego-motion compensation implemented; pc_range-clamp opacity bug found+fixed; Gaussian-budget representational gap discovered (44.4% of clips exceed damage threshold) |
 | 2026-07-30-steps1-4-clean-baseline | 5 | 6400 | 2 | Stage B, compensation OFF | 1e-4 AdamW | best held-out delta +0.044 → +0.106 across Steps 1-4 | — | — | rotation-order fix, grid resolution/channel rebalance, 4DGC-confirmed PE-as-coordinate query, conv-decoder HyperNet; each a modest real single-run improvement, collapse-then-plateau shape unchanged |
 | 2026-07-30-scene-scaling-sweep-noise-floor | 5 | 6400 | 2 | Stage B | 1e-4 AdamW | n=1/3/6/8: +0.091/+0.125/+0.105/+0.068, no monotonic pattern | — | — | CRITICAL: do-nothing baseline varies ~0.036 run-to-run (should be deterministic) -- same order of magnitude as claimed architecture gains; ALL Step 1-4 and scene-scaling comparisons provisional pending noise-floor measurement; work PAUSED here |
+| 2026-08-08-option-d-direct-projection | 5 | 6400 | 2 | Stage B | 1e-4 AdamW | Gate3 n=8: +0.082 (peak inconclusive); trough oscillates -0.84 to -1.05, recurring | — | — | direct per-Gaussian projection, no dense grid; both un-norm/norm variants concluded, not improved |
+| 2026-08-13-vggt-deformable-kickoff | 5 | 6400 | 2 | Stage B | 1e-4 AdamW | Gate1 pass only | — | 11.85 GB → 7.30 GB (post-downsample fix) | VGGT-1B frozen feature extractor + 4-block deformable attention; resolution crisis found+fixed |
+| 2026-08-14-vggt-deformable-image-wh-bugfix | 5 | 6400 | 2 | Stage B | 1e-4 AdamW | pre-fix -0.384 (n=3, ~85% fallback rate) | — | 7.30 GB | image_wh/native-scale mismatch found+fixed; fallback rate 85%→4-9% post-fix |
+| 2026-08-18-vggt-deformable-dropout | 5 | 6400 | 2 | Stage B, z_dropout | 1e-4 AdamW | -0.442 (n=3) vs -0.496 no-dropout | — | 7.30 GB | modest, ambiguous improvement; same collapse shape unchanged |
+| 2026-08-19-vggt-cross-architecture-conclusion | 5 | 6400 | 2 | Stage B | 1e-4 AdamW | 5 architectures, same signature: in-sample loss ↓, held-out peaks epoch 4-6 then collapses | — | — | CONCLUSION: likely small-data generalization gap, not a remaining bug; VGGT reverted, redirect toward data scale |
+| 2026-08-22-professor-review-gf3d-faithful | 5→6 | — | — | — | — | — | — | — | professor adopts GF3D-faithful design for report; Motion HyperNet kept as personal backup, VGGT discarded; git branches restructured |
+| 2026-08-21-full-dataset-vram-and-wiring | Full-dataset | 25600 | — | Stage A only | — | n/a (feasibility check) | — | ~4.07 GB (synthetic fwd pass) | N_g=25600 VRAM confirmed; full nuScenes v1.0-trainval + SurroundOcc pipeline wired; 5 real bugs found+fixed |
+| 2026-08-22-small-tier-gate-check | Full-dataset | 25600 | — | Stage A only | 1e-4 AdamW | 8.54→9.53→10.36→10.51→10.52 (6 epochs, 50 scenes, real GF3D mIoU metric — NOT directly comparable to the held-out-delta numbers above) | — | ~23 GB | healthy signal, plateau expected at 50 scenes; skip medium tier, proceed to full |
+| 2026-08-24-full-scale-stage-a-training | Full-dataset | 25600 | — | Stage A only | 1e-4 AdamW | 17.24→22.06→23.61 (epochs 0-2, 700 scenes, real GF3D mIoU) | iou2: 38.64→39.98 | ~23 GB (tight, recurring OOM diagnosed+resolved) | stopped deliberately at epoch 3/6 given 20-day budget; ~87% of GF3D's own reported 27.1 mIoU |
+| 2026-08-27-g0-extraction-cache | Full-dataset | 25600 | — | Stage A only (inference) | n/a | n/a | n/a | n/a | G_0 cached for all 850 scenes; 2 real bugs + 1 drive write-corruption issue found+fixed via 5-scene test first |
+| 2026-08-28-gf3d-faithful-housekeeping | Full-dataset | — | — | — | — | — | — | — | Motion HyperNet/Step5 modules removed from gf3d-faithful-stageb (preserved on archive branches); repo cleanup, data/README.md updated |
 
 **Note on commit history:** a few commits don't map to a distinct log entry above, since they
 were formatting/checklist-wording fixes rather than new runs: `ea1f404` (corrected Phase 0
@@ -1314,3 +1325,373 @@ information, camera overlaps need handling, temporal conditioning is weak -- rem
 unresolved; Step 5's specific implementation attempt is parked, not abandoned,
 pending investigation of the trough-collapse hypothesis (spatial layout as a
 stronger per-scene fingerprint than a pooled scalar) before any further attempt.
+---
+
+## [Phase 5] Run ID: 2026-08-08-option-d-direct-projection-gate1-gate2-gate3
+
+### Option D: skip the intermediate 3D motion grid entirely
+
+Each Gaussian projected directly into both frames' real camera images (reusing
+GaussianFormer3D's real `DeformableFeatureAggregation3D.project_points_3d`,
+verified line-by-line against real source), sampling real image+depth features
+there directly -- no dense grid, no HyperNet. Branch `step5b-direct-projection`.
+
+### Gate 1: PASS. Gate 2/3 (un-normalized variant): peak inconclusive vs. noise
+floor; trough shows a real, recurring instability
+
+Gate 3 (n=8): best held-out delta +0.082 (do-nothing=4.973), within noise band vs.
+every prior architecture's best-ever. HOWEVER: trough oscillated repeatedly into
+-0.84 to -1.05 territory throughout an extended (2x normal length) run -- arguably
+worse than Step 5's single collapse point, since it recurred rather than occurring
+once, despite double the training budget.
+
+Hypothesis: z (the concatenated sampled feature) was raw, unnormalized, high-
+dimensional CNN feature-map values -- no normalization step anywhere before the
+heads -- plausible cause of both slow convergence and per-step output instability.
+
+### Normalization variant: instability resolved, but Gate 2 now clearly
+unpromising (not just inconclusive)
+
+Added per-frame (not joint) LayerNorm before concatenation. Gate 1 directly
+confirmed the hypothesis: delta_mu range dropped from full tanh saturation
+(-4 to 4) to a sane range (-0.73 to 0.84). Gate 2 (n=3): reached a stable,
+converged plateau at -0.099 -- fast, stable, but clearly below every other
+architecture's best-ever by a margin outside the noise band. Per the agreed
+stopping rule (no clear improvement -> move to a different design), stopped here,
+not escalated to Gate 3.
+
+### Overall Option D conclusion
+
+Both variants (un-normalized, normalized) do not show meaningful improvement over
+existing baselines. USE_DIRECT_PROJECTION reverted to False. Both variants' code,
+tests, and wiring fully intact and committed on `step5b-direct-projection` --
+nothing deleted. Moving to consider a different design.
+
+---
+
+## [Phase 5] Run ID: 2026-08-13-vggt-deformable-design-kickoff-and-gate1
+
+### New design: VGGT-1B as a frozen dense feature extractor, feeding 4-block
+iterative deformable cross-attention
+
+Branch `vggt-deformable-attention`. Reuses Option D's verified projection
+machinery for the geometric anchor (K=4 learned offset samples + learned
+attention weighting per block, independent weights per block, matching Stage A's
+own verified non-weight-tied decoder precedent). Two implementation-blocking
+decisions confirmed against real source before writing code: (1) PAD (not resize)
+images to a multiple of 14, new `PadRawImagesForVGGT` transform, separate
+`vggt_img`/`vggt_image_wh` stream; (2) use VGGT's final cached layer only, not
+full DPT-style multi-scale fusion (simplest starting choice, explicit disclosed
+caveat re: fine spatial detail).
+
+Gate 1: PASS. Peak VRAM 11.85GB (vs. 3.1-3.6GB every prior architecture) --
+expected consequence of VGGT-1B's scale, not alarming at this stage.
+
+---
+
+## [Phase 5] Run ID: 2026-08-13-vggt-deformable-resolution-crisis-and-downsample-fix
+
+### Gate 2 at native resolution: ~22 min/optimizer step, projected ~9 days --
+killed, not viable
+
+Root cause: VGGT-1B's own tested default is img_size=518 (1369 patches/frame);
+our native resolution + feeding all 12 frames (6 cams x 2 timesteps) as one
+global-attention sequence meant ~5.5x more tokens than VGGT-typical, and
+self-attention cost scales quadratically with sequence length.
+
+Fix: downsample AFTER padding, target (392, 700) -- 1400 patches/frame, close to
+VGGT's own native 1369. Verified geometrically correct via a real marker test.
+Re-ran Gate 1: peak VRAM dropped to 7.30GB, completed in ~10 seconds.
+
+---
+
+## [Phase 5] Run ID: 2026-08-14-vggt-deformable-image-wh-bug-found-via-diagnosis
+
+### Gate 2/3 initial result (-0.384 at n=3): diagnosed as a real bug, not
+architecture underperformance, before accepting it
+
+Reasoning: a well-motivated design built on proven components performing worse
+than designs already known to be broken is a signature of an implementation bug,
+not a bad idea. Four-item diagnostic pass (delta_mu saturation check,
+fallback-embedding usage rate, VGGT's real input normalization, image_wh/padding
+consistency) found: fallback-embedding usage rate ~85% -- meaning ~97.5% of
+(camera, Gaussian) pairs were being marked invalid, training almost entirely on
+a learned placeholder.
+
+Root cause found and fixed: `image_wh` was set to the DOWNSAMPLED resolution,
+but `projection_mat`'s own coordinates are always in native-padded pixel units --
+dividing native-scale coordinates by the downsampled width/height gave values
+like 1600/700 ~= 2.3, far outside [0,1], failing validity checks for almost
+everything. Fixed: `image_wh` set to native-padded scale (1610, 910), distinct
+from the downsampled tensor's actual shape. Fallback rate dropped to ~4-9%
+post-fix, confirming the fix.
+
+---
+
+## [Phase 5] Run ID: 2026-08-18-vggt-deformable-dropout-result-and-detailed-eval-blocked
+
+### z_dropout result: modest, ambiguous improvement; core collapse pattern
+unchanged
+
+n=3, 20 epochs: best held-out delta -0.442 (vs. -0.496 no-dropout baseline at the
+same point) -- real, same-direction improvement of +0.054, but within the
+characterized noise floor. Underlying shape unchanged: peak at epoch 6, then
+oscillates -0.5 to -1.3 for the remaining 13 epochs, same signature as every
+other run.
+
+Corrected an earlier hypothesis: re-checked `evaluate_heldout()`'s real code --
+it already averages over ALL 78 held-out clips on every call, not a subset.
+Swings between checkpoints are real, fast changes in held-out behavior, not
+measurement noise.
+
+Per-class/per-clip detailed evaluation script built but blocked -- external
+Transcend HDD became unavailable mid-session (hardware/infrastructure issue, not
+code), set aside rather than debugged further.
+
+---
+
+## [Phase 5] Run ID: 2026-08-19-vggt-deformable-cross-architecture-synthesis-and-conclusion
+
+### Cross-architecture pattern: five structurally different designs, same
+failure shape
+
+Steps 1-4, Step 5, Option D (both variants), VGGT+deformable-attention (four
+independent bug-fixed variations) all show the identical signature: training
+loss reliably, monotonically improves every time; held-out performance peaks
+early (epoch 4-6) and never recovers. Diagnostic coverage unusually thorough
+(parameter coverage, gradient flow, quaternion validity, offset magnitude,
+attention entropy, resolution/normalization consistency, VGGT input
+normalization, fallback rate, checkpointing correctness -- all directly measured,
+not just reasoned about).
+
+Most likely explanation: a genuine generalization gap given the ~8-10 scene
+mini-dataset's limited diversity, not a remaining silent bug in any one
+architecture -- far more parsimonious than five independent architecture-specific
+failures. USE_VGGT_DEFORMABLE reverted to False; code fully intact and committed
+on `vggt-deformable-attention`. Redirects effort toward what has never been
+tried (L_tv/L_lidar, deliberate regularization/overfitting countermeasures, and
+critically: more/better data) rather than another architecture attempt at this
+same data scale.
+
+---
+
+## [Phase 5→6] Run ID: 2026-08-22-professor-review-gf3d-faithful-adopted
+
+### Professor meeting: architecture direction decided
+
+Presented the VGGT+deformable-attention design; could not adequately explain the
+Deformation part and several architectural details under questioning. Directed
+to discuss with labmate and return with a resolved design. Following that
+discussion, proposed reverting to a design built by directly reusing
+GaussianFormer3D's own real modules (`DeformableFeatureAggregation3D`, anchor/Q
+construction, per-block operation sequence) for the `t>0` deformation step,
+applied to the reference-buffer Gaussian instead of a freshly-initialized one --
+for consistency and reliability with the reference architecture, given repeated
+difficulty explaining/justifying more novel designs (VGGT's complexity, feature-
+dimension mismatch, heavy global attention) under scrutiny.
+
+**Professor's decision (final meeting):** GF3D-faithful design accepted as the
+official internship report architecture. Motion HyperNet and VGGT-deformable-
+attention both directed to be dropped from the report. Personal decision (not
+report-facing): Motion HyperNet kept as an explicit backup/Plan B in case the
+GF3D-faithful design does not work; VGGT-deformable-attention fully discarded
+per the professor's direction, no backup kept.
+
+Full architecture, method, math, professor Q&A (4 review points: refinement-
+module structure, ego-motion/coordinate-frame necessity, attention-weight
+mechanism, DFA math location), citations (GaussianFormer, GaussianFormer3D,
+DFA3D, Deformable DETR, 4DGC, Attention Is All You Need) developed and confirmed
+against real GaussianFormer3D source throughout (`GaussianOccEncoder3D`,
+`DeformableFeatureAggregation3D`, `SparseGaussian3DRefinementModule`,
+`gaussian_lifter.py`, `NuScenesAdaptor`) -- not from the paper's text alone.
+Design document (STAGE_B_GF3D_FAITHFUL_DESIGN.md) developed iteratively over
+several sessions; a v2 revision (source-verified corrections: kps_generator's
+real anchor+Q construction, AnchorEncoder's real five-way split, FFN/LayerNorm
+ordering) exists but is not yet finalized/added to this repo -- separate
+decision pending on Design A vs. Design B (cascaded vs. non-cascaded block
+iteration) before treating it as final.
+
+### Git branch restructuring
+
+- `archive/motion-hypernet-backup` -- created from `main`, explicit personal
+  backup, not part of the report.
+- `archive/vggt-deformable-attention` -- renamed from `vggt-deformable-attention`
+  (full history preserved, old branch name removed from GitHub only, no data
+  lost).
+- `archive/option-d-direct-projection` -- renamed from `step5b-direct-projection`,
+  same treatment, for consistency (concluded earlier, same category).
+- `gf3d-faithful-stageb` -- new active branch, created from
+  `stage-a-full-dataset-gs25600` (not `main`), since the new design builds on
+  the full-dataset infrastructure, not the mini-dataset Motion HyperNet code.
+- `main` -- unchanged for now (still Motion HyperNet); to be replaced with
+  GF3D-faithful content once implemented and confirmed working.
+
+---
+
+## [Full-dataset pivot] Run ID: 2026-08-21-full-dataset-vram-check-and-data-wiring
+
+### Motivation
+
+Senior labmate (Ruby, GaussianFormer2/PLAS compression, not GaussianFormer3D)
+provided an SSD (`1TSSD`) containing what was confirmed to be genuine full-scale
+nuScenes v1.0-trainval (433GB, `v1.0-trainval` folder naming, not mini) plus
+SurroundOcc annotations (41GB) -- real chance to move off the ~8-10 scene mini
+dataset, directly motivated by the cross-architecture small-data-overfitting
+finding above.
+
+### Step 1: VRAM feasibility, N_g=25600
+
+Real GF3D full-scale config (`nuscenes_surroundocc_gs25600.py`) confirmed via
+synthetic-tensor forward pass (no real data needed yet): ~4.07GB peak, forward-
+pass only, comfortable headroom vs. 24GB budget. Five real bugs found and fixed
+along the way, each confirmed via direct verification rather than assumed:
+depth-head requires real GT depth shape (not None); real image height is padded
+to 928 (multiple of 32), not the raw 900 the config states; in-place tensor
+mutation (`squeeze_`) corrupted a reused tensor across two forward passes in the
+test harness itself; GaussianHead's splat step needs `occ_xyz`/`occ_label`/
+`occ_cam_mask` in UN-flattened grid shape, matching this project's own
+`LoadOccupancyOcc3d` convention exactly.
+
+### Step 2: full data pipeline wiring
+
+- Symlinked `data/nuscenes`, `data/nuscenes_cam`, `data/surroundocc` inside the
+  GaussianFormer3D repo (matching real `data_root`/`anno_root`/`occ_path`
+  conventions from `_base_/surroundocc_pcd_dfa3d.py`).
+- Found and fixed a real double-nesting issue: the actual nuScenes JSON
+  metadata tables and `maps`/`samples`/`sweeps` folders were nested one level
+  deeper than the devkit expects (`v1.0-trainval/v1.0-trainval/...`) -- fixed via
+  read-only symlinks up one level, nothing moved/copied, Ruby's real data
+  untouched throughout.
+- Generated `nuscenes_infos_gf3d_{train,val}.pkl` via GF3D's own real
+  `tools/make_gf3d_infos.py --regenerate`, reading Ruby's existing
+  `*_sweeps_occ.pkl` files (read-only) -- confirmed real counts: 700 train
+  scenes/28,130 keyframes, 150 val scenes/6,019 keyframes (28,130+6,019=34,149,
+  exactly matching the devkit's own reported total sample count -- full
+  coverage, nothing excluded).
+- Generated depth-GT ourselves (204,894 files, ~6.75 min), reusing and adapting
+  this project's own `generate_depth_gt.py` (built earlier for the mini
+  dataset) rather than depending on GaussianFormer3D's own dead SharePoint
+  download link -- confirmed correct via direct content verification (u/v
+  ranges within image bounds, plausible depth values).
+- All new outputs written to a separate `/media/user/1TSSD/min/` folder
+  structure, never mixed into or overwriting Ruby's original data.
+
+### Real training smoke test: PASS
+
+`train.py` ran cleanly on real full-scale data: healthy, decreasing loss
+(31.8->22.0 over 450 iterations), stable grad_norm, ~2.25-2.3s/iteration.
+
+---
+
+## [Full-dataset pivot] Run ID: 2026-08-22-small-tier-gate-check
+
+### Small-tier (50 train / 10 val scenes) gate check: healthy signal, confirms
+readiness for full-scale
+
+Per-epoch mIoU: 8.54 -> 9.53 -> 10.36 -> 10.51 -> 10.52 across 6 epochs (real
+plateau by epoch 3-4, expected given only 50 scenes' diversity). One real
+disconnect/OOM incident mid-run, recovered cleanly via `train.py`'s own
+confirmed `latest.pth` auto-resume logic -- no data lost. Decision: healthy
+signal, skip the medium tier, proceed directly to full-scale.
+
+---
+
+## [Full-dataset pivot] Run ID: 2026-08-24-to-08-27-full-scale-stage-a-training
+
+### Full-scale training (700 train / 70 val scenes, N_g=25600, 6 epochs planned)
+
+Launched under a resilient auto-restart wrapper (survives OOM/crashes/
+disconnects, resumes via `latest.pth`). Real per-epoch mIoU: 17.24 -> 22.06 ->
+23.61 (epochs 0-2 inclusive), each a real, meaningful gain (not yet plateaued,
+unlike the small tier at the same point) -- one epoch of full-scale data alone
+exceeded the small tier's entire 5-epoch result by ~64%.
+
+Real, recurring OOM issue diagnosed during epoch 2 (0-indexed): 4 consecutive
+crashes at the same point across ~33 hours, distinguished from ordinary
+per-sample bad luck by the fact epochs 0-1 never failed -- consistent with a
+cumulative memory-pressure issue, not a rare unlucky sample. Resolved without
+needing to fix the root cause: attempt 5 succeeded through the same stretch
+that failed 4 times prior; a proactive per-epoch-restart wrapper was prepared
+as a ready backup but never needed.
+
+**Decision: stopped after epoch 3's checkpoint (mIoU=23.61), deliberately, given
+the 20-day total budget.** ~87% of GaussianFormer3D's own reported 27.1 mIoU,
+reached in 3 epochs vs. their 24 -- efficient convergence, not full convergence;
+gains were still real and ongoing (not plateaued) when stopped, a genuine
+time-budget tradeoff, not a claim of convergence. Per-class breakdown showed the
+expected pattern: strong on large/common classes (vegetation 39.5%,
+driveable_surface 34.3%), weaker on small/rare dynamic classes (bicycle,
+motorcycle, traffic_cone) -- worth remembering when interpreting future Stage B
+results on exactly those classes, since Stage A's own G_0 is weaker there
+regardless of Stage B's design.
+
+---
+
+## [Full-dataset pivot] Run ID: 2026-08-27-g0-extraction-cache-built
+
+### G_0 extraction pipeline: built, debugged, validated, run across all 850 scenes
+
+Built `extract_g0_cache.py` (GaussianFormer3D repo) + `make_frame0_infos.py`
+(this repo) to run the trained Stage A checkpoint once per scene (frame 0 only,
+combining both train/val splits, 850 scenes total) and cache each scene's G_0
+(means/scales/rotations/opacities/semantics) to its own file -- so no future
+Stage B experiment needs to re-run Stage A.
+
+Real bugs found and fixed via a 5-scene test before committing to the full run:
+missing `import model` (registry decorators never triggered); `scene_token`
+does not survive inside the collated batch as assumed -- fixed by reading it
+directly from `dataset.keyframes[i]` instead, exploiting the known,
+deterministic (shuffle=False, batch_size=1) iteration order; a genuine,
+repeated silent write-corruption issue on the `1TSSD` drive (a file reported a
+plausible size via `ls -la` but was still corrupted/truncated on actual read,
+twice) -- fixed by making the write self-verifying (temp file + explicit
+flush/fsync + read-back verification + atomic rename), a pattern now to be
+reused for any future write to this drive.
+
+Full run: 850/850 scenes extracted successfully (~7.7 min), spot-checked
+(correct shape `(1, 25600, 3)`, correct scene-token match).
+
+---
+
+## [Full-dataset pivot] Run ID: 2026-08-28-gf3d-faithful-branch-housekeeping
+
+### Repository cleanup on gf3d-faithful-stageb
+
+Removed Motion HyperNet/Step5-specific modules no longer needed by the new
+design (`conv_hypernet.py`, `hypernet.py`, `grid_query.py`, `pool_features.py`,
+`spatial_conv_hypernet.py`, `spatial_pool_features.py`, `spawn_head.py`,
+`configs/stage_b_temporal.yaml`, and their now-orphaned tests) -- explicitly
+KEPT `buffer.py`, `current_frame_encoder.py`, `deform_heads.py`, all confirmed
+still directly reused by the new design (verified via the design document's own
+stated reuse plan and, for `deform_heads.py` specifically, via checking
+`__init__.py`'s real re-export list before assuming anything was safe to
+remove). `test_stage_b_skeleton.py` trimmed to its architecture-independent
+quaternion-composition test (recursion/shape test deferred until the new
+deformation module exists to test against). One real oversight caught and
+fixed: `test_spatial_pool_features.py` was initially missed in the first
+cleanup pass, left importing an already-deleted module -- found via a full
+directory sweep, fixed in a follow-up commit.
+
+Separately: two confirmed-dead mini-dataset configs removed
+(`dataset_mini_occ3d.yaml`, `stage_a_gaussianformer3d.yaml` -- zero code
+references, confirmed earlier this project), three scripts archived to
+`scripts/deprecated/` (jobs fully superseded by later real results:
+`overfit_stage_a_single_frame.py`, `spot_check_dataloader.py`,
+`verify_scene_coverage.py`). `data/README.md` updated to document the
+full-scale dataset's actual location (separate GaussianFormer3D repo, not
+tracked here) alongside the still-valid, deliberately-kept mini-dataset setup
+(retained as a fast, cheap iteration/sanity-check tool for new Stage B designs
+before committing to full-scale runs).
+
+Full original history for everything removed/archived remains available on
+`archive/motion-hypernet-backup` and `main` -- nothing destroyed, only
+reorganized.
+
+### Current status
+
+Active branch: `gf3d-faithful-stageb`. Stage A: real, full-scale checkpoint
+available (`epoch_3.pth`, mIoU=23.61), `G_0` cached for all 850 scenes. Stage B:
+design finalized pending the Design A vs. Design B decision (see design
+document); implementation not yet started. Next: finalize
+`STAGE_B_GF3D_FAITHFUL_DESIGN.md`, add it to `docs/`, then begin actual
+implementation.

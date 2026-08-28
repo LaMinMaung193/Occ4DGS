@@ -135,16 +135,30 @@ Step 4 -- 3D Deformable Attention (reused verbatim -- DeformableFeatureAggregati
      determining where to sample and how much to trust each sample happens
      beforehand, inside this same module, using Q/anchor/anchor_embed as real
      inputs.
-  6. output = self.output_proj(slots); output = output + instance_feature if
-     residual_mode == "add" (confirmed default) -- the residual add happens
-     inside this module, before it returns.
+  6. output = self.output_proj(slots); [v5, CORRECTED] our real config uses
+     residual_mode="cat", not "add" -- confirmed directly from
+     deformable_module_3d.py's real source. output = torch.cat([output,
+     instance_feature], dim=-1), giving (B, N, 2*embed_dims), NOT a same-shape
+     residual add. This concatenation happens inside this module, before it
+     returns -- explains why the real FFN config has in_channels=256 (2x
+     embed_dims=128): the FFN is what reduces back to embed_dims, not this
+     module's own output.
 - Output: Q_new -- same shape as Q ((B, N_g, embed_dims)).
 
 Step 5 -- FFN + LayerNorm (reused, unchanged)
-- Input: Q_new.
-- Flow, confirmed against GaussianOccEncoder3D's real operation_order:
-  Q_new -> LayerNorm -> FFN -> LayerNorm -> Q^(l) -- two LayerNorms bookending
-  one FFN, not a single LayerNorm applied once after FFN.
+- Input: Q_new (the (B,N,256) concatenated output from Step 4, under our real
+  residual_mode="cat").
+- Flow, [v5, CORRECTED] confirmed against this exact config's real
+  operation_order (['deformable','ffn','norm','refine', 'spconv','norm',
+  'deformable','ffn','norm','refine', ...]): Q_new -> FFN -> LayerNorm -> Q^(l)
+  -- ONE LayerNorm, positioned AFTER FFN, not two bookending it (this was
+  incorrectly stated as "two LayerNorms" in v2/v3 and never caught until this
+  revision). FFN reduces 256 -> 128 in the same step. Note: GF3D's own blocks
+  2-4 also have a norm right after spconv, before deformable -- but that norm
+  exists specifically to stabilize spconv's own output, which our design
+  doesn't use at all (disclosed simplification, all blocks). Every block in
+  OUR design uses the same, uniform, spconv-free sequence (matching GF3D's own
+  block-1 pattern), not GF3D's block-1-vs-later distinction.
 - Role: attention only produces a weighted sum of sampled values -- a linear
   combination; it can only interpolate between what it's given, never create a
   genuinely new pattern. FFN adds non-linear processing on top, independently
@@ -237,13 +251,20 @@ net-negative when combined with learning).
 
 ### 3.4 Per-block iteration, l = 1..L [v3 -- Design B, cascaded]
 
-    Q^(l) = DeformableFeatureAggregation3D(Q^(l-1), anchor^(l-1), anchor_embed^(l-1),
-                                             F^c_t, F^d_t, metas)
-             -- residual already applied internally: Q^(l) = Q^(l-1) + Delta_Q
+    Q_cat^(l) = DeformableFeatureAggregation3D(Q^(l-1), anchor^(l-1), anchor_embed^(l-1),
+                                                 F^c_t, F^d_t, metas)
+             -- [v5, CORRECTED] residual_mode="cat" is our real config's actual
+             -- value (confirmed directly from deformable_module_3d.py source,
+             -- NOT "add" as v2/v3 assumed): output = concat(output_proj(slots),
+             -- Q^(l-1)), giving (B, N, 2*embed_dims), not a same-shape residual add.
 
-    Q^(l) = LayerNorm(Q^(l))
-    Q^(l) = FFN(Q^(l))
-    Q^(l) = LayerNorm(Q^(l))
+    Q^(l) = FFN(Q_cat^(l))           -- [v5] reduces 2*embed_dims -> embed_dims;
+                                      -- matches the real operation_order
+                                      -- (deformable -> ffn -> norm, confirmed NO
+                                      -- norm between deformable and ffn)
+    Q^(l) = LayerNorm(Q^(l))         -- [v5] ONE norm per block, after FFN --
+                                      -- GF3D's norm-after-spconv (blocks 2-4)
+                                      -- doesn't apply to us (no spconv, any block)
 
     Delta_mu_i^(l) = Phi_mu(Q_i^(l), anchor_embed_i^(l-1))
     Delta_r_i^(l)  = Phi_r(Q_i^(l), anchor_embed_i^(l-1))

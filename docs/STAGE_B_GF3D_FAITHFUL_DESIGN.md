@@ -193,27 +193,41 @@ for completeness.)
     Q^(0) = InstanceFeatureEmbedding      -- fixed, learned, per-slot; independent of anchor
     anchor_embed^(0) = AnchorEncoder(anchor^(0))
 
-### 3.3 Frame transform before projection -- still flagged, not fully answered
+### 3.3 Frame transform before projection -- RESOLVED (v4)
 
-anchor^(0)'s position (mu_i) is stored in G_{t-1}'s own frame.
-GaussianFormer3D's real project_points_3d (used inside Step 4, via
+anchor^(0)'s position (mu_i) AND rotation (r_i) are stored in G_{t-1}'s own
+frame. GaussianFormer3D's real project_points_3d (used inside Step 4, via
 kps_generator) requires positions already in frame t's local LiDAR frame,
 matching frame t's projection_mat -- confirmed necessary in this project's
 earlier work (Option D design, the professor Q&A on ego-motion/coordinate-frame
-necessity). The same requirement applies here. Before the anchor is passed
-into the reused DeformableFeatureAggregation3D, a transient (not persisted)
-copy of its position must be transformed:
+necessity). kps_generator ALSO uses the anchor's rotation to orient its
+sampling template (an oriented ellipsoid, not a sphere) -- so the same
+frame-consistency requirement applies to rotation, not just position: if the
+ego vehicle turned between t-1 and t, "up/forward/right" in frame t-1's terms
+is not the same as in frame t's terms. Leaving rotation unconverted while
+converting only position would build an internally inconsistent template.
 
-    mu_i^(proj) = compute_relative_transform(pose_prev, pose_curr) @ [mu_i, 1]^T
+Before the anchor is passed into the reused DeformableFeatureAggregation3D, a
+transient (not persisted) copy of BOTH its position and rotation must be
+transformed:
 
-This is still flagged, not answered -- carried over unresolved from v1/v2.
-Needs a real, deliberate decision before implementation. Every prior use of
-compute_relative_transform in this project (Option D, the earlier VGGT design)
-only ever needed to transform position, because neither design used a
-rotation-dependent sampling pattern like kps_generator's. Needs to be verified
-against how GF3D itself would handle a moving reference frame (it never has
-one, since it only ever runs at t=0), or reasoned through and decided
-explicitly.
+    T = compute_relative_transform(pose_prev, pose_curr)   -- (4,4), rotation
+                                                              included, confirmed
+                                                              directly from the
+                                                              real code: T = inv
+                                                              (pose_curr) @ pose_prev,
+                                                              both full SE(3) poses
+    mu_i^(proj) = T @ [mu_i, 1]^T
+    q_rel = rotmat_to_quat(T[:3, :3])
+    r_i^(proj) = quat_multiply(q_rel, r_i)
+
+Resolution confirmed: compute_relative_transform was never translation-only --
+it already returns a full rigid transform (verified directly against the real
+function in deform_heads.py), so no new utility function is needed.
+rotmat_to_quat and quat_multiply both already exist in the same file. The gap
+was only ever in this design doc's own math, which previously applied T to
+mu_i but never took T's rotational part and applied it to r_i. That gap is
+fixed above.
 
 Only the transient projection-input copy is affected either way -- G_{t-1}'s
 actual stored mu_i, r_i are never reassigned to a new frame; this mirrors

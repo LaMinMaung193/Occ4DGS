@@ -8,6 +8,7 @@ from .deform_heads import (
     axis_angle_to_quat,
     rotmat_to_quat,
     compute_relative_transform,
+    transform_anchor_for_projection,
     apply_ego_compensated_update_rule,
     compute_spawn_candidate_positions,
 )
@@ -22,6 +23,7 @@ __all__ = [
     "axis_angle_to_quat",
     "rotmat_to_quat",
     "compute_relative_transform",
+    "transform_anchor_for_projection",
     "apply_ego_compensated_update_rule",
     "compute_spawn_candidate_positions",
 ]

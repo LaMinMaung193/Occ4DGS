@@ -89,6 +89,44 @@ def compute_relative_transform(pose_prev: torch.Tensor, pose_curr: torch.Tensor)
     return torch.linalg.inv(pose_curr) @ pose_prev
 
 
+def transform_anchor_for_projection(
+    mu: torch.Tensor,
+    r: torch.Tensor,
+    pose_prev: torch.Tensor,
+    pose_curr: torch.Tensor,
+):
+    """Transform an anchor's position AND rotation from pose_prev's local frame
+    into pose_curr's local frame -- a TRANSIENT copy for use as input to
+    DeformableFeatureAggregation3D's projection/sampling step only. The
+    Gaussian's actual, persisted mu/r (in the reference buffer) are never
+    reassigned to a new frame; only this function's returned copies are.
+
+    Design doc: STAGE_B_GF3D_FAITHFUL_DESIGN.md, Section 3.3 (v4, resolved).
+    Both position and rotation need this transform: kps_generator uses the
+    anchor's rotation (not just position) to orient its sampling template, so
+    leaving rotation unconverted while converting only position would build an
+    internally inconsistent template if the ego vehicle turned between frames.
+
+    mu: (N, 3) anchor positions, in pose_prev's local frame.
+    r: (N, 4) anchor rotations (quaternions, w-x-y-z), in pose_prev's local frame.
+    pose_prev, pose_curr: (4, 4) homogeneous poses (e.g. lidar2global), same
+        convention as compute_relative_transform.
+
+    Returns (mu_proj, r_proj): (N, 3), (N, 4) -- transformed into pose_curr's
+    local frame. Rotation is composed current-first (q_rel (x) r), matching
+    this project's own established quaternion-composition convention.
+    """
+    T = compute_relative_transform(pose_prev, pose_curr)  # (4, 4)
+
+    mu_h = torch.cat([mu, torch.ones_like(mu[:, :1])], dim=-1)  # (N, 4)
+    mu_proj = (mu_h @ T.T)[:, :3]  # (N, 3)
+
+    q_rel = rotmat_to_quat(T[:3, :3])  # (4,)
+    r_proj = quat_normalize(quat_multiply(q_rel, r))  # broadcasts (4,) vs (N,4) -> (N,4)
+
+    return mu_proj, r_proj
+
+
 # ---------------------------------------------------------------------------
 # Deformation heads
 # ---------------------------------------------------------------------------

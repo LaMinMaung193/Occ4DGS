@@ -44,33 +44,103 @@ ROT_SLICE = slice(6, 10)
 OPACITY_SLICE = slice(10, 11)
 SEMANTIC_SLICE = slice(11, 28)
 
+# CRITICAL FIX: the anchor tensor's position/scale/opacity/semantics slices are
+# NOT real-world values -- confirmed directly against refine_module.py's real
+# forward(): position and scale are PRE-SIGMOID (sigmoid()+pc_range/scale_range
+# scaling applied to DECODE them), opacity is pre-sigmoid, semantics is
+# pre-softplus. Only rotation is stored directly (just L2-normalized, no
+# activation). The original version of this file put real GaussianState values
+# (real meters, real 0-1 opacity, etc.) directly into these slices with NO
+# inverse-activation applied -- confirmed to cause silent, severe corruption:
+# a real position near the pc_range boundary (e.g. x=48) was being treated as
+# an unbounded pre-sigmoid input, sigmoid-saturating to ~1.0 regardless of the
+# real value, eventually surfacing as an out-of-bounds crash in GaussianHead's
+# splatting step. Fixed here by reusing GF3D's own real safe_sigmoid/
+# safe_inverse_sigmoid (model/utils/safe_ops.py) for the encode/decode round
+# trip, matching refine_module.py's real logic exactly. No equivalent
+# safe_inverse_softplus exists in GF3D's own codebase (checked directly, not
+# assumed) -- implemented here as our own addition, clamped for the same
+# numerical-stability reasons GF3D's own safe_sigmoid/safe_inverse_sigmoid are.
+
+from model.utils.safe_ops import safe_sigmoid, safe_inverse_sigmoid  # noqa: E402
+
+# Real config values, confirmed directly from nuscenes_surroundocc_gs25600.py
+_PC_RANGE = torch.tensor([-50.0, -50.0, -5.0, 50.0, 50.0, 3.0])
+_SCALE_RANGE = (0.01, 1.8)
+_SEMANTICS_INVERSE_SOFTPLUS_CLAMP = 20.0  # softplus(20) is already ~20 (saturated
+                                           # linear regime); clamping the OUTPUT
+                                           # value before inverting avoids feeding
+                                           # extreme/degenerate inputs into log(expm1(.))
+
+
+def _safe_inverse_softplus(y: torch.Tensor) -> torch.Tensor:
+    """Inverse of F.softplus: softplus(x) = log(1+e^x), so x = log(e^y - 1).
+    Not a GF3D utility -- GF3D's own safe_ops.py has no equivalent (checked
+    directly), added here following the same clamping philosophy as their real
+    safe_sigmoid/safe_inverse_sigmoid. Requires y > 0 (softplus's real range);
+    clamps to a small positive floor to avoid log(0) for near-zero inputs, and
+    an upper ceiling since softplus becomes linear (softplus(x) ~= x) for large
+    x anyway, making the exact inverse increasingly poorly-conditioned there.
+    """
+    y = torch.clamp(y, min=1e-6, max=_SEMANTICS_INVERSE_SOFTPLUS_CLAMP)
+    return torch.log(torch.expm1(y))
+
 
 def gaussian_state_to_anchor(state: GaussianState) -> torch.Tensor:
-    """Converts our own GaussianState (buffer format) into the flat 28-dim anchor
-    tensor GaussianFormer3D's real modules expect. Assumes state's tensors are
-    unbatched (N, ...); returns (1, N, 28) to match GF3D's real (B, N, 28) convention.
+    """Converts our own GaussianState (real, decoded values -- real meters,
+    real 0-1 opacity, etc.) into the flat 28-dim RAW anchor tensor
+    GaussianFormer3D's real modules expect (pre-sigmoid/pre-softplus, per
+    refine_module.py's real decode logic -- see the CRITICAL FIX note above).
+    Assumes state's tensors are unbatched (N, ...); returns (1, N, 28) to match
+    GF3D's real (B, N, 28) convention.
     """
+    pc_range = _PC_RANGE.to(state.means.device, state.means.dtype)
+
+    mu_normalized = (state.means - pc_range[:3]) / (pc_range[3:6] - pc_range[:3])
+    mu_raw = safe_inverse_sigmoid(mu_normalized)
+
+    scale_normalized = (state.scales - _SCALE_RANGE[0]) / (_SCALE_RANGE[1] - _SCALE_RANGE[0])
+    scale_raw = safe_inverse_sigmoid(scale_normalized)
+
+    rotations_raw = state.rotations  # NOT transformed -- confirmed: refine_module
+                                      # only normalizes rotation, no sigmoid/activation
+
+    opacity_raw = safe_inverse_sigmoid(state.opacities)
+
+    semantics_raw = _safe_inverse_softplus(state.semantics)
+
     anchor = torch.cat([
-        state.means,       # (N, 3)
-        state.scales,      # (N, 3)
-        state.rotations,   # (N, 4)
-        state.opacities,   # (N, 1)
-        state.semantics,   # (N, semantic_dim)
+        mu_raw, scale_raw, rotations_raw, opacity_raw, semantics_raw,
     ], dim=-1)
     return anchor.unsqueeze(0)  # (1, N, 28)
 
 
 def anchor_to_gaussian_state(anchor: torch.Tensor) -> GaussianState:
-    """Inverse of gaussian_state_to_anchor. anchor: (1, N, 28) or (N, 28) --
-    squeezes the batch dim if present, since GaussianState itself is unbatched."""
+    """Inverse of gaussian_state_to_anchor -- decodes the raw anchor tensor back
+    into real, usable values, matching refine_module.py's real decode logic
+    exactly (sigmoid+range-scaling for position/scale, sigmoid for opacity,
+    softplus for semantics, normalize-only for rotation).
+    anchor: (1, N, 28) or (N, 28) -- squeezes the batch dim if present, since
+    GaussianState itself is unbatched."""
     if anchor.dim() == 3:
         anchor = anchor.squeeze(0)
+    pc_range = _PC_RANGE.to(anchor.device, anchor.dtype)
+
+    mu_normalized = safe_sigmoid(anchor[..., MU_SLICE])
+    means = pc_range[:3] + mu_normalized * (pc_range[3:6] - pc_range[:3])
+
+    scale_normalized = safe_sigmoid(anchor[..., SCALE_SLICE])
+    scales = _SCALE_RANGE[0] + scale_normalized * (_SCALE_RANGE[1] - _SCALE_RANGE[0])
+
+    rotations = torch.nn.functional.normalize(anchor[..., ROT_SLICE], dim=-1)
+
+    opacities = safe_sigmoid(anchor[..., OPACITY_SLICE])
+
+    semantics = torch.nn.functional.softplus(anchor[..., SEMANTIC_SLICE])
+
     return GaussianState(
-        means=anchor[..., MU_SLICE],
-        scales=anchor[..., SCALE_SLICE],
-        rotations=anchor[..., ROT_SLICE],
-        opacities=anchor[..., OPACITY_SLICE],
-        semantics=anchor[..., SEMANTIC_SLICE],
+        means=means, scales=scales, rotations=rotations,
+        opacities=opacities, semantics=semantics,
     )
 
 

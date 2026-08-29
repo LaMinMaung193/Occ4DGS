@@ -76,13 +76,25 @@ _SEMANTICS_INVERSE_SOFTPLUS_CLAMP = 20.0  # softplus(20) is already ~20 (saturat
 def _safe_inverse_softplus(y: torch.Tensor) -> torch.Tensor:
     """Inverse of F.softplus: softplus(x) = log(1+e^x), so x = log(e^y - 1).
     Not a GF3D utility -- GF3D's own safe_ops.py has no equivalent (checked
-    directly), added here following the same clamping philosophy as their real
-    safe_sigmoid/safe_inverse_sigmoid. Requires y > 0 (softplus's real range);
-    clamps to a small positive floor to avoid log(0) for near-zero inputs, and
-    an upper ceiling since softplus becomes linear (softplus(x) ~= x) for large
-    x anyway, making the exact inverse increasingly poorly-conditioned there.
+    directly). Requires y > 0 (softplus's real range) -- confirmed via real
+    G_0 data that this always holds by construction (strictly positive, no
+    exceptions across a full 25600x17 tensor).
+
+    [FIX] The lower clamp was originally set to 1e-6 -- confirmed via direct
+    inspection of real G_0 semantics to be WAY too aggressive: 80,549 of
+    435,200 real values (~18.5%) fall below 1e-6, with the real minimum at
+    2.58e-19 -- eighteen orders of magnitude smaller. Since semantics is never
+    touched by any network computation in our design (frozen, passed straight
+    through every block), an encode-decode round trip should be exactly
+    lossless -- that 1e-6 floor was silently distorting a large fraction of
+    real values with no mathematical justification (torch.expm1 is already
+    numerically stable for small inputs -- that's its specific purpose, no
+    protective floor needed there). Lower bound now set far below any
+    plausible real value, purely as a defensive floor against a literal
+    zero/negative edge case that should never occur given real data, not
+    something intended to ever actually engage.
     """
-    y = torch.clamp(y, min=1e-6, max=_SEMANTICS_INVERSE_SOFTPLUS_CLAMP)
+    y = torch.clamp(y, min=1e-30, max=_SEMANTICS_INVERSE_SOFTPLUS_CLAMP)
     return torch.log(torch.expm1(y))
 
 

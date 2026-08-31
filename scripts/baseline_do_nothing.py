@@ -79,6 +79,20 @@ def main():
     encoder = CurrentFrameEncoder(segmentor)
 
     from misc.metric_util import MeanIoU
+
+    def extract_per_class_ious(miou_metric):
+        per_class = {}
+        for i, label in enumerate(miou_metric.label_str):
+            if miou_metric.total_seen[i] == 0:
+                iou = 1.0
+            else:
+                iou = (miou_metric.total_correct[i] / (
+                    miou_metric.total_seen[i] + miou_metric.total_positive[i]
+                    - miou_metric.total_correct[i]
+                )).item()
+            per_class[label] = iou * 100
+        return per_class
+
     miou_metric = MeanIoU(
         list(range(1, 17)),
         17,
@@ -152,13 +166,18 @@ def main():
                 print(f"  {idx+1}/{len(val_dataset)} scenes processed...")
 
     miou, iou2 = miou_metric._after_epoch()
+    per_class = extract_per_class_ious(miou_metric)
+    import json
+    result = {"method": "do_nothing_baseline", "mIoU": float(miou), "iou2": float(iou2), "per_class_iou": per_class}
+    out_path = "/media/user/1TSSD/min/stageb_training/eval_results/do_nothing_baseline.json"
+    with open(out_path, "w") as f:
+        json.dump(result, f, indent=2)
     print(f"\n{'='*60}")
     print(f"DO-NOTHING BASELINE (G_0 unchanged, {len(val_dataset)} held-out scenes)")
     print(f"  mIoU:  {float(miou):.4f}")
     print(f"  iou2:  {float(iou2):.4f}")
+    print(f"  Saved -> {out_path}")
     print(f"{'='*60}")
-    print(f"\nStage B training is only adding real value once its own val_mIoU")
-    print(f"rises meaningfully above {float(miou):.4f}.")
 
 
 if __name__ == "__main__":

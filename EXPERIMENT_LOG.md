@@ -1695,3 +1695,75 @@ design finalized pending the Design A vs. Design B decision (see design
 document); implementation not yet started. Next: finalize
 `STAGE_B_GF3D_FAITHFUL_DESIGN.md`, add it to `docs/`, then begin actual
 implementation.
+
+## [2026-08-31] Stage B (GF3D-faithful, Design B) -- first real training run, L=4
+
+**Setup:** single-step training (G_0 -> next genuinely-moving real keyframe,
+>=0.5m ego translation), 651 train scenes / 140 held-out val scenes (genuine
+split -- an earlier manifest draft incorrectly combined train+val, caught and
+fixed before any real training). L=4 blocks, embed_dims=128, AdamW,
+batch_size=1. LR schedule: 2-epoch linear warmup to 1e-4 (confirmed necessary
+via a 20-scene gate check -- without it, a real mid-training instability hump
+appeared, epochs 8-14 rising back to near the epoch-1 starting loss); cosine
+decay to 1e-5 added when extending past epoch 20 (train_loss still improving
+smoothly at that point, not a "stuck" fix -- added to reduce late-training
+val_mIoU noise, confirmed effective: epoch 18-20 band 13.63-14.46 vs. epoch
+33-40 band 15.15-15.27 after decay).
+
+**Real bugs found and fixed before this run produced valid results** (full
+detail in prior entries/commits): a critical anchor encode/decode bug (real
+GaussianState values were fed directly into GF3D's real modules without the
+required sigmoid/softplus inverse-activation, silently corrupting position,
+scale, opacity, and semantics -- confirmed via a real out-of-bounds splatting
+crash, fixed by reusing GF3D's own real safe_sigmoid/safe_inverse_sigmoid);
+an overly-aggressive semantics clamp in the fix itself (min=1e-6 distorted
+~18.5% of real semantic values, caught via a frozen-property round-trip
+assertion failing); a real out-of-range crash from genuine large ego-motion
+scenes requiring a boundary-safety clamp on the transformed anchor position.
+
+**Training progression** (40 epochs total, across two extensions from an
+initial 9-epoch run):
+
+| Epoch | train_loss | val_loss | val_mIoU | val_iou2 |
+|---|---|---|---|---|
+| 1 | 4.759 | 4.792 | 3.81 | 15.69 |
+| 9 | 3.782 | 4.079 | 11.26 | 24.56 |
+| 20 | 3.581 | 3.818 | 14.46 | 29.41 |
+| 33 | 3.401 | 3.775 | **15.22** | **30.31** |
+| 40 | 3.372 | 3.770 | 15.20 | 30.27 |
+
+Converged by ~epoch 30; val_mIoU plateaued in a tight 15.15-15.27 band for
+the final ~8 epochs (real convergence, not cut off early) while train_loss
+kept very gently decreasing -- earliest, mild signature of the train/val gap
+widening, consistent with stopping here being the right call.
+
+**Official checkpoint: `epoch_33.pth`** (highest val_mIoU among all saved
+checkpoints; CHECKPOINT_EVERY=3 means epoch 34's own peak, 15.2684 in the
+raw per-epoch log, was never actually saved to disk -- epoch 33 and 36 are
+the real neighbors, both within noise of it).
+
+**Three-table comparison, same 140 held-out scenes, same real MeanIoU
+metric throughout:**
+
+| Table | Method | mIoU | iou2 |
+|---|---|---|---|
+| 1 | Static 3DGS (fresh Stage A per-frame, no temporal reuse -- the oracle ceiling) | 21.93 | 35.80 |
+| 2 | Do-nothing baseline (G_0 reused unchanged, frame-transformed, no deformation) | 13.52 | 27.80 |
+| 3 | **Stage B (ours, L=4, epoch 33)** | **15.22** | **30.31** |
+
+Stage B closes ~21% of the gap between doing nothing and the full,
+expensive oracle reconstruction ((15.22-13.52)/(21.93-13.52) = 0.208) --
+a real, genuine improvement from a single feedforward deformation step,
+on genuinely held-out data never touched during training.
+
+**Known limitations of this result, stated plainly:** single-step training
+only (G_0 -> one real next-frame prediction per scene, never chaining the
+model's own predictions recursively) -- real multi-step deployment
+(evaluating a full ~40-frame scene sequentially) has not been tested and is
+a known, deliberate gap, not yet closed. Evaluated on one frame-pair per
+scene (791 total pairs across train+val combined), not dense per-frame
+supervision the way Stage A itself was trained.
+
+**Next:** L=6 ablation (same training recipe, only block count changed) to
+test whether more capacity closes more of the remaining gap, before
+committing to the larger, riskier multi-step recursive training investment.

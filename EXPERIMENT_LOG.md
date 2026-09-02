@@ -1882,8 +1882,12 @@ value by epoch ~10 (far faster than L=4 or L=6), and the final ~10 epochs
 the three L values tested. ~15.5min/epoch (vs ~23min for L=4/L=6) --
 genuinely faster, not just comparably fast.
 
-**Official L=2 checkpoint: `epoch_38.pth`** (highest val_mIoU among saved
-checkpoints).
+**Official L=2 checkpoint: `epoch_40.pth`** (val_mIoU=15.71 -- note:
+epoch 38's own raw val_mIoU, 15.73, was the true peak in the per-epoch log,
+but CHECKPOINT_EVERY=3 means epoch 38 itself was never actually saved to
+disk -- the same situation encountered with L=4's epoch 33/34. epoch_40.pth
+is the highest val_mIoU among checkpoints that genuinely exist, and is
+within noise of the unsaved true peak).
 
 **Result: L=2 outperforms both L=4 and L=6 -- a clean, monotonic ordering.**
 
@@ -1913,7 +1917,7 @@ worth noting L=2 was not tested for whether MORE epochs specifically would
 have helped it further, given its own late-epoch plateau looked genuinely
 stable, not still improving).
 
-**Official Stage B configuration updated: L=2, epoch_38.pth** (superseding
+**Official Stage B configuration updated: L=2, epoch_40.pth** (superseding
 L=4, epoch_33.pth, as the reported result). All report materials (per-class
 chart, qualitative BEV comparisons, full-val diff statistics) are being
 regenerated against this checkpoint, saved to a separate results folder

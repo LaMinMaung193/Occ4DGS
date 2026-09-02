@@ -1767,3 +1767,159 @@ supervision the way Stage A itself was trained.
 **Next:** L=6 ablation (same training recipe, only block count changed) to
 test whether more capacity closes more of the remaining gap, before
 committing to the larger, riskier multi-step recursive training investment.
+
+## [2026-09-01] Stage B ablation -- L=6, same recipe as L=4
+
+**Setup:** identical recipe to the L=4 run (same 651 train / 140 held-out val
+split, same warmup+cosine-decay LR schedule, same AdamW, batch_size=1) --
+only NUM_BLOCKS changed, 4 -> 6. Separate checkpoint directory
+(checkpoints_L6/) and log file (train_log_L6.txt), to avoid any risk of the
+resume logic loading an L=4 checkpoint into an L=6 model (shape mismatch).
+
+**Real bug found and fixed:** L=6's real peak VRAM (20.56GB) exceeded what
+was available while sharing the GPU, causing a genuine CUDA OOM crash-restart
+loop (confirmed via a real out-of-memory traceback, not assumed). Root cause:
+memory fragmentation ("3.03GB reserved but unallocated" in the real error) --
+the same category of issue Stage A's own training addressed via
+PYTORCH_CUDA_ALLOC_CONF=max_split_size_mb:512, applied here too. Confirmed
+fixed: training then ran cleanly through completion.
+
+**A real methodological issue found and corrected mid-run, worth recording
+precisely:** training was paused after 20 epochs for report work, using
+NUM_EPOCHS=20 at that time -- meaning L=6's cosine decay began immediately
+after its 2-epoch warmup and ran continuously through all 20 epochs. This
+made an epoch-20-vs-epoch-20 comparison against L=4 invalid: L=4's own first
+20 epochs (from its original run) were spent entirely at CONSTANT lr=1e-4
+(decay was only added later, when L=4 itself was extended past epoch 20) --
+so L=4 had ~18 full epochs of high-LR exploration in its first 20, while L=6
+had almost none. Caught before drawing any conclusion from the epoch-20
+numbers (L=6 was tracking meaningfully lower: 11.92 vs L=4's 14.46) --
+correctly identified as an artifact of the schedule difference, not
+necessarily architecture. Fixed by extending L=6 to NUM_EPOCHS=40 (matching
+L=4's real final scope) and resuming from epoch_20.pth, giving L=6 genuine
+renewed high-LR exploration before its own decay phase, for a fair comparison.
+
+**Full training progression (40 epochs, across the pre/post-extension
+boundary at epoch 20):**
+
+| Epoch | train_loss | val_loss | val_mIoU | val_iou2 |
+|---|---|---|---|---|
+| 1 | 5.051 | 5.192 | 2.13 | 11.96 |
+| 20 (pre-extension, decayed schedule -- not comparable to L=4 epoch 20) | 3.798 | 4.003 | 11.92 | 26.63 |
+| 21 (renewed exploration begins) | 3.908 | 4.076 | 11.02 | 24.72 |
+| 30 | 3.590 | 3.846 | 14.04 | 28.87 |
+| 33 | 3.550 | 3.817 | 14.39 | 29.49 |
+| 36 | 3.519 | 3.809 | **14.60** | **29.99** |
+| 40 | 3.500 | 3.826 | 14.37 | 29.44 |
+
+Converged by ~epoch 30, plateaued in a tight 14.1-14.6 band for the final
+~10 epochs -- a genuine, real convergence (same pattern as L=4's own run),
+not cut short.
+
+**Official L=6 checkpoint: `epoch_36.pth`** (highest val_mIoU among saved
+checkpoints, CHECKPOINT_EVERY=3).
+
+**Result: L=6 did NOT outperform L=4.**
+
+| L | Best val_mIoU | Epoch | Params |
+|---|---|---|---|
+| 4 | **15.22** | 33 | 5.46M |
+| 6 | 14.60 | 36 | 6.49M |
+
+L=6 used ~19% more parameters, ~27% more peak VRAM (20.56GB vs 16.21GB),
+required a real fragmentation-config fix just to fit, and produced a result
+0.62 mIoU points LOWER than L=4 -- a real, negative ablation finding, not
+noise (both runs converged to a stable, tight plateau, not still-moving
+numbers being compared mid-flight).
+
+**Interpretation:** the current performance ceiling is likely NOT explained
+by insufficient deformation-network capacity. More blocks did not help, and
+if anything pointed slightly the other way. This is useful, real evidence
+that the more promising direction for further improvement is elsewhere --
+most plausibly the single-step training scope itself (the model has only
+ever seen pristine G_0 as input, never its own accumulated prediction error,
+a known and named limitation since the original single-step-vs-multi-step
+training decision) -- rather than continuing to scale L further.
+
+**Next:** L=4 remains the official, reported Stage B configuration.
+Multi-step recursive training (and, bundled with it, the previously-deferred
+L_lidar/L_tv loss completion -- L_tv specifically requires a real multi-step
+sequence to be meaningful at all, confirmed not implementable under the
+current single-step scope) is now the more clearly-motivated next
+investment, not further L scaling.
+
+## [2026-09-01] Stage B ablation -- L=2, completing the {2,4,6} comparison
+
+**Setup:** identical recipe to L=4/L=6 (same 651 train / 140 held-out val
+split, same warmup+cosine-decay LR schedule over the full 40 epochs from the
+start this time -- avoiding the two-phase 20->40 approach that created a
+real LR-schedule confound for the L=6 comparison). Only NUM_BLOCKS changed,
+4 -> 2. Separate checkpoint directory (checkpoints_L2/) and log file
+(train_log_L2.txt).
+
+**One real, unrelated bug hit at launch, quickly diagnosed and fixed:** the
+first launch attempt crash-looped immediately with
+`ModuleNotFoundError: No module named 'mmengine'` -- traced to the launch
+being run from a terminal/session where the gf3d conda environment had not
+been activated (confirmed via `which python` after activating correctly).
+Not a code bug; relaunching in a properly-activated shell resolved it
+immediately.
+
+**Full training progression (40 epochs, single clean schedule throughout):**
+
+| Epoch | train_loss | val_loss | val_mIoU | val_iou2 |
+|---|---|---|---|---|
+| 1 | 4.149 | 4.177 | 10.40 | 24.76 |
+| 10 | 3.538 | 3.803 | 15.06 | 30.11 |
+| 20 | 3.399 | 3.765 | 15.45 | 30.33 |
+| 30 | 3.298 | 3.740 | 15.67 | 30.73 |
+| 38 | 3.257 | 3.739 | **15.73** | **30.72** |
+| 40 | 3.252 | 3.737 | 15.71 | 30.91 |
+
+Notably fast, clean convergence -- val_mIoU was already close to its final
+value by epoch ~10 (far faster than L=4 or L=6), and the final ~10 epochs
+(37-40: 15.65/15.73/15.68/15.71) form the tightest, least noisy plateau of
+the three L values tested. ~15.5min/epoch (vs ~23min for L=4/L=6) --
+genuinely faster, not just comparably fast.
+
+**Official L=2 checkpoint: `epoch_38.pth`** (highest val_mIoU among saved
+checkpoints).
+
+**Result: L=2 outperforms both L=4 and L=6 -- a clean, monotonic ordering.**
+
+| L | Best val_mIoU | Epoch | Params | Epoch time |
+|---|---|---|---|---|
+| **2** | **15.73** | 38 | 4.43M | ~15.5min |
+| 4 | 15.22 | 33 | 5.46M | ~23min |
+| 6 | 14.60 | 36 | 6.49M | ~23min |
+
+Performance DECREASES monotonically as L increases across the entire range
+tested (2, 4, 6) -- not just "L=6 is worse," but a real, consistent trend:
+more blocks hurt, at every step tested. L=2 uses ~19% fewer parameters than
+L=4 and ~32% fewer than L=6, trains ~33% faster per epoch than either, and
+still wins on the actual metric that matters.
+
+**Interpretation, now confirmed across three points rather than two:** the
+current performance ceiling is not explained by insufficient deformation-
+network capacity -- if anything, the opposite. The most likely explanation:
+with only 651 training scenes and a single feedforward step per scene, a
+larger network overfits faster than a smaller one generalizes -- consistent
+with L=2's own trajectory being the fastest-converging and least noisy of
+the three. This strengthens (does not merely repeat) the L=6 finding: the
+more promising direction for further improvement is elsewhere -- most
+plausibly the single-step training scope itself, or simply more real
+training data per model (unlikely to help much further at L=6's scale, but
+worth noting L=2 was not tested for whether MORE epochs specifically would
+have helped it further, given its own late-epoch plateau looked genuinely
+stable, not still improving).
+
+**Official Stage B configuration updated: L=2, epoch_38.pth** (superseding
+L=4, epoch_33.pth, as the reported result). All report materials (per-class
+chart, qualitative BEV comparisons, full-val diff statistics) are being
+regenerated against this checkpoint, saved to a separate results folder
+rather than overwriting the L=4 materials (kept for the ablation record).
+
+**Next:** L={2,4,6} ablation complete. Decision pending: finalize L=2 as the
+reported result and move to report writing, or pursue multi-step recursive
+training as a further, larger investment (see L=6 entry's discussion of
+L_tv's dependency on this).

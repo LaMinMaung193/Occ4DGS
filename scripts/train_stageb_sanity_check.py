@@ -23,7 +23,6 @@ Run from Occ4DGS repo root, in the gf3d env:
     PYTHONNOUSERSITE=1 python scripts/train_stageb.py
 """
 import json
-import math
 import os
 import pickle
 import sys
@@ -63,36 +62,24 @@ from src.models.stage_b_temporal.deform_heads import transform_anchor_for_projec
 from src.datasets.stageb_dataset import StageBTrainingDataset
 
 CONFIG_PATH = os.path.join(GF3D_ROOT, "config/nuscenes_surroundocc_gs25600_full.py")
-CHECKPOINT = os.path.join(GF3D_ROOT, "out/nuscenes_surroundocc_gs25600_full/surroundocc_release.pth")  # authors' own released checkpoint, replacing our own epoch_3
+CHECKPOINT = os.path.join(GF3D_ROOT, "out/nuscenes_surroundocc_gs25600_full/epoch_3.pth")
 
 STAGEB_DIR = "/media/user/1TSSD/min/stageb_training"
 TRAIN_PAIRS_PKL = os.path.join(STAGEB_DIR, "nuscenes_infos_gf3d_stageb_pairs_train.pkl")
 VAL_PAIRS_PKL = os.path.join(STAGEB_DIR, "nuscenes_infos_gf3d_stageb_pairs_val.pkl")
 TRAIN_MANIFEST = os.path.join(STAGEB_DIR, "stageb_manifest_train.json")
 VAL_MANIFEST = os.path.join(STAGEB_DIR, "stageb_manifest_val.json")
-G0_CACHE_DIR = "/media/user/1TSSD/min/g0_cache_pretrained_release"  # regenerated using the released checkpoint
-OUT_DIR = os.path.join(STAGEB_DIR, "checkpoints_L4_pretrained_release")  # L=4 retrain, released checkpoint G0
+G0_CACHE_DIR = "/media/user/1TSSD/min/g0_cache"
+OUT_DIR = os.path.join(STAGEB_DIR, "checkpoints_SANITY_CHECK_ONLY")
 
 N_G = 25600
 EMBED_DIMS = 128
-NUM_BLOCKS = 4  # L=4 retrain with released-checkpoint G0, same 40-epoch budget as L=2 for a fair comparison
+NUM_BLOCKS = 4
 
 LR = 1e-4
-MIN_LR = 1e-5  # cosine decay floor, added when extending training past 20
-                # epochs -- train_loss was still improving smoothly with no
-                # plateau, so this isn't a "stuck, need help" fix; it's a
-                # principled, risk-reducing addition (matches Stage A's own
-                # real cosine-decay convention) targeting the val_mIoU noise
-                # seen late in the constant-LR run (epoch 19 dipping before
-                # 20 recovered) -- decay only ever makes steps smaller, never
-                # larger, so it cannot make anything worse than constant LR.
 WARMUP_EPOCHS = 2
-NUM_EPOCHS = 40  # matching L=2's own budget for a fair comparison
-              # this time, avoiding the two-phase 20->40 approach that
-              # created a real LR-schedule confound for the L=6 comparison
-              # (see EXPERIMENT_LOG.md). Single, clean schedule throughout,
-              # directly comparable to L=4's and L=6's full trajectories.
-CHECKPOINT_EVERY = 3
+NUM_EPOCHS = 1  # SANITY CHECK ONLY -- real run uses 9
+CHECKPOINT_EVERY = 1
 
 ANCHOR_ENCODER_CFG = dict(
     type="SparseGaussian3DEncoder", embed_dims=128, include_opa=True,
@@ -254,6 +241,7 @@ def main():
     train_dataset = StageBTrainingDataset(
         train_underlying, TRAIN_MANIFEST, G0_CACHE_DIR, train_raw_infos
     )
+    train_dataset.samples = train_dataset.samples[:30]  # SANITY CHECK ONLY -- slightly bigger this time
 
     print("Building Stage B VAL dataset (held-out, NEVER trained on)...")
     ds_config_val = dict(cfg.val_dataset_config)
@@ -264,6 +252,7 @@ def main():
     val_dataset = StageBTrainingDataset(
         val_underlying, VAL_MANIFEST, G0_CACHE_DIR, val_raw_infos
     )
+    val_dataset.samples = val_dataset.samples[:10]  # SANITY CHECK ONLY
 
     from misc.metric_util import MeanIoU
     miou_metric = MeanIoU(
@@ -285,52 +274,20 @@ def main():
     ).cuda()
     optimizer = torch.optim.AdamW(deform.parameters(), lr=LR)
 
-    # RESUME LOGIC: check for an existing checkpoint before starting fresh.
-    # Without this, any crash-and-restart (accidental Ctrl+C, OOM, power
-    # blip) would silently discard all progress and start over from random
-    # init -- only safe to auto-restart once this exists.
-    start_epoch = 0
-    history = {"train_loss": [], "val_loss": [], "val_miou": [], "val_iou2": []}
-    existing_checkpoints = sorted(
-        [f for f in os.listdir(OUT_DIR) if f.startswith("epoch_") and f.endswith(".pth")],
-        key=lambda f: int(f[len("epoch_"):-len(".pth")]),
-    ) if os.path.isdir(OUT_DIR) else []
-
-    if existing_checkpoints:
-        latest = existing_checkpoints[-1]
-        latest_path = os.path.join(OUT_DIR, latest)
-        print(f"\nFound existing checkpoint: {latest_path}")
-        ckpt = torch.load(latest_path, map_location="cuda")
-        deform.load_state_dict(ckpt["model_state_dict"])
-        optimizer.load_state_dict(ckpt["optimizer_state_dict"])
-        history = ckpt["history"]
-        start_epoch = ckpt["epoch"]
-        print(f"Resuming from epoch {start_epoch + 1} (already completed: {start_epoch})")
-    else:
-        print("\nNo existing checkpoint found -- starting fresh from epoch 1.")
-
     print(f"\n{'='*70}")
     print(f"Training: {len(train_dataset)} train scenes, {len(val_dataset)} held-out val scenes")
-    print(f"{NUM_EPOCHS} epochs total, warmup={WARMUP_EPOCHS} epochs, lr={LR}")
+    print(f"{NUM_EPOCHS} epochs, warmup={WARMUP_EPOCHS} epochs, lr={LR}")
     print(f"Output: {OUT_DIR}")
     print(f"{'='*70}\n")
 
+    history = {"train_loss": [], "val_loss": [], "val_miou": [], "val_iou2": []}
     t_total_start = time.time()
 
-    for epoch in range(start_epoch, NUM_EPOCHS):
+    for epoch in range(NUM_EPOCHS):
         if epoch < WARMUP_EPOCHS:
             current_lr = LR * (epoch + 1) / WARMUP_EPOCHS
         else:
-            # Cosine decay LR -> MIN_LR over the post-warmup range. Note:
-            # epochs 2-19 already ran at constant LR (added only when
-            # extending past 20) -- this does not "redo" those epochs, it
-            # only changes the formula used for epochs from here forward.
-            # At epoch 20 specifically, this lands partway down the curve
-            # (~5.7e-5, not a fresh 1e-4) -- a real, visible step down in
-            # the log, not a discontinuity to worry about.
-            progress = (epoch - WARMUP_EPOCHS) / max(1, (NUM_EPOCHS - WARMUP_EPOCHS - 1))
-            progress = min(progress, 1.0)
-            current_lr = MIN_LR + 0.5 * (LR - MIN_LR) * (1 + math.cos(math.pi * progress))
+            current_lr = LR
         for pg in optimizer.param_groups:
             pg["lr"] = current_lr
 

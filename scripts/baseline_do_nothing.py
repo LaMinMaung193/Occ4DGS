@@ -43,12 +43,12 @@ from src.models.stage_b_temporal.deform_heads import transform_anchor_for_projec
 from src.datasets.stageb_dataset import StageBTrainingDataset
 
 CONFIG_PATH = os.path.join(GF3D_ROOT, "config/nuscenes_surroundocc_gs25600_full.py")
-CHECKPOINT = os.path.join(GF3D_ROOT, "out/nuscenes_surroundocc_gs25600_full/epoch_3.pth")
+CHECKPOINT = os.path.join(GF3D_ROOT, "out/nuscenes_surroundocc_gs25600_full/surroundocc_release.pth")  # released checkpoint, matching train_stageb.py
 
 STAGEB_DIR = "/media/user/1TSSD/min/stageb_training"
 VAL_PAIRS_PKL = os.path.join(STAGEB_DIR, "nuscenes_infos_gf3d_stageb_pairs_val.pkl")
 VAL_MANIFEST = os.path.join(STAGEB_DIR, "stageb_manifest_val.json")
-G0_CACHE_DIR = "/media/user/1TSSD/min/g0_cache"
+G0_CACHE_DIR = "/media/user/1TSSD/min/g0_cache_pretrained_release"  # regenerated with the released checkpoint
 
 
 def move_dict_to_cuda(data):
@@ -169,7 +169,7 @@ def main():
     per_class = extract_per_class_ious(miou_metric)
     import json
     result = {"method": "do_nothing_baseline", "mIoU": float(miou), "iou2": float(iou2), "per_class_iou": per_class}
-    out_path = "/media/user/1TSSD/min/stageb_training/eval_results/do_nothing_baseline.json"
+    out_path = "/media/user/1TSSD/min/stageb_training/eval_results/do_nothing_baseline_pretrained_release.json"  # separate from the old, epoch_3-based baseline
     with open(out_path, "w") as f:
         json.dump(result, f, indent=2)
     print(f"\n{'='*60}")

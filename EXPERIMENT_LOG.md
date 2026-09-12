@@ -1927,3 +1927,105 @@ rather than overwriting the L=4 materials (kept for the ablation record).
 reported result and move to report writing, or pursue multi-step recursive
 training as a further, larger investment (see L=6 entry's discussion of
 L_tv's dependency on this).
+
+## [2026-09-02/03] Stage A baseline -- resuming static GaussianFormer3D from epoch_3.pth to full capacity (6 -> 12 epochs)
+
+**Context:** per professor's direction, resumed Stage A's own real training (the
+static, pre-existing GaussianFormer3D baseline used as the frozen backbone
+throughout all Stage B work) from its epoch_3.pth checkpoint, extending the
+originally-planned max_epochs from 6 to 12, to give it full training capacity
+as a stronger baseline for the final report's comparison. This is GaussianFormer3D's
+own train.py, a genuinely different codepath from anything built for Stage B.
+
+**Real bug #1, found and fixed before any training resumed:** `timm`'s
+CosineLRScheduler computes `t_initial = len(loader) * max_epochs` at
+CONSTRUCTION time, but `scheduler.load_state_dict(ckpt['scheduler'])`
+restores the OLD scheduler's own saved `t_initial` (confirmed via an
+isolated empirical test: `t_initial` IS a key in the saved state dict) --
+silently overwriting a freshly-built 12-epoch scheduler back to the old
+6-epoch curve. Verified this would have made the epoch extension completely
+ineffective (epochs 7-12 would train at an already near-zero, bottomed-out
+LR). Fixed with a one-line override immediately after the resume load:
+`scheduler.t_initial = len(train_dataset_loader) * max_num_epochs`.
+Confirmed `_get_lr()` computes the LR fresh from `self.t_initial` at every
+call (no precomputed array), so this override alone is sufficient.
+
+**Real bug #2:** first resume attempt hit a genuine CUDA OOM (fragmentation
+pattern -- "reserved but unallocated" memory large). Fixed with
+`PYTORCH_CUDA_ALLOC_CONF=max_split_size_mb:512`, the same proven fix used
+for Stage B's own L=6 ablation.
+
+**Real bug #3:** wandb was live-logging to a real online run (train.py calls
+`wandb.init()` directly, unlike Stage B's own scripts). Fixed with
+`WANDB_MODE=disabled`.
+
+**Real bug #4, investigated and reverted:** tried `amp=True` to address a
+recurring OOM -- hit a hard, unfixable incompatibility: the custom
+`ms_depth_score_sample_cuda_forward` CUDA kernel does not support half
+precision at all ("not implemented for 'Half'"). Reverted to `amp=False`;
+this is not a tuning knob, AMP cannot be used with this codebase's custom op.
+
+**Real incident:** briefly ran with TWO duplicate training processes
+simultaneously (an earlier wrapper was not fully killed before a new one was
+launched) -- caught before any checkpoint write collision occurred;
+`epoch_3.pth` verified to still load correctly (epoch=3, global_iter=84390)
+afterward. No data lost, but a close call -- now always verify `ps aux`
+shows a clean process list before every relaunch.
+
+**Real, initially-alarming-but-ultimately-benign finding:** the logged
+`lr: 0.0000100` appeared stuck regardless of the t_initial fix. Investigated
+by inspecting the real checkpoint's saved scheduler state directly: the
+optimizer uses TWO parameter groups with different base LRs (`1e-5` for the
+backbone, `1e-4` for the rest) -- `train.py` only ever logs
+`param_groups[0]['lr']` (confirmed via source), which is the backbone group
+whose `lr_max == lr_min == 1e-5` BY DESIGN, so it is *supposed* to stay flat
+regardless of schedule length. The scheduler's genuine `t_initial` fix was
+confirmed working correctly for the group that actually matters, once
+verified via a direct `_get_lr()` call with the real saved parameters.
+
+**Real, serious bug #5:** train.py only saves checkpoints at the END of a
+full epoch (28,130 iterations) by default -- meaning every mid-epoch crash
+discarded ALL progress within that epoch. Root-caused via log timestamps:
+observed one genuine ~1,100-iteration run (43 minutes) discarded entirely
+by a single crash. Fixed by enabling the already-existing, previously-unused
+`--iter-resume` flag (saves a mid-epoch checkpoint every 50 iterations to
+`iter.pth`), confirmed present in train.py's own real code, not a new
+mechanism we built.
+
+**Real bug #6:** after enabling `--iter-resume`, restarts were STILL
+resetting to iteration 0 every time. Root cause: our own explicit
+`--resume-from epoch_3.pth` flag was overriding train.py's own auto-detection
+of `latest.pth` (confirmed: `if args.resume_from: cfg.resume_from =
+args.resume_from` always wins over auto-detection) -- meaning every restart
+was forcibly reloading the ORIGINAL epoch_3.pth checkpoint, discarding
+`iter.pth`'s newer progress every single time. Fixed by dropping the
+explicit `--resume-from` flag entirely, letting train.py's own
+auto-detection correctly find and use `latest.pth` (which itself gets
+correctly updated to point at `iter.pth` once mid-epoch saves begin).
+
+**Real bug #7, the most serious:** even with both fixes above, training hit
+a genuinely DETERMINISTIC, reproducible OOM at a specific iteration
+(~1300-1350 in this epoch's shuffle order) -- confirmed via log evidence:
+412 restart attempts and 816 error occurrences over 6+ hours, always
+crashing at the exact same point, making zero net progress. A deterministic
+per-frame OOM cannot be solved by restarting alone, no matter how many
+times. Fixed with a genuine code change to train.py's training loop: wrapped
+the forward+backward+optimizer-step block in a try/except catching
+`torch.cuda.OutOfMemoryError` specifically (never a bare except), clearing
+gradients and the CUDA cache and skipping to the next iteration on catch,
+rather than letting one oversized frame crash the whole process. Confirmed
+working immediately: 12 real OOMs successfully skipped within the first
+~10 minutes after the fix, with training continuing past the point that
+previously blocked all progress for 6+ hours.
+
+**Known, honest caveat for the final report:** epochs 4+ of this baseline
+will have trained on a dataset with a small number of frames skipped due to
+OOM (a handful confirmed so far, likely more as training continues) --
+unlike epochs 1-3, which trained on every frame. Given the alternative was
+being permanently stuck, this is the correct tradeoff, but worth stating
+plainly rather than treating epochs 1-12 as trained identically.
+
+**Status:** training resumed and progressing as of this entry, past the
+previously-blocking iteration, with `--iter-resume` correctly checkpointing
+every 50 iterations and the OOM-skip patch handling occasional oversized
+frames without crashing. Target: 12 total epochs (up from the original 6).

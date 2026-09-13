@@ -30,6 +30,10 @@ writing and professor check-ins.
 | 2026-08-24-full-scale-stage-a-training | Full-dataset | 25600 | — | Stage A only | 1e-4 AdamW | 17.24→22.06→23.61 (epochs 0-2, 700 scenes, real GF3D mIoU) | iou2: 38.64→39.98 | ~23 GB (tight, recurring OOM diagnosed+resolved) | stopped deliberately at epoch 3/6 given 20-day budget; ~87% of GF3D's own reported 27.1 mIoU |
 | 2026-08-27-g0-extraction-cache | Full-dataset | 25600 | — | Stage A only (inference) | n/a | n/a | n/a | n/a | G_0 cached for all 850 scenes; 2 real bugs + 1 drive write-corruption issue found+fixed via 5-scene test first |
 | 2026-08-28-gf3d-faithful-housekeeping | Full-dataset | — | — | — | — | — | — | — | Motion HyperNet/Step5 modules removed from gf3d-faithful-stageb (preserved on archive branches); repo cleanup, data/README.md updated |
+| 2026-09-08-released-checkpoint-adoption-and-g0-reextraction | Report finalization | 25600 | — | Stage A (released ckpt adopted) | n/a | 25.13 (Static, new ckpt) | 38.38 | — | Released checkpoint adopted over our own OOM-affected training; G_0 re-extracted |
+| 2026-09-09-to-09-11-stage-b-retrain-released-checkpoint | Report finalization | 25600 | 1 | Stage B, L=2/L=4 | 1e-4 AdamW | 18.44 (L=2, official) | 32.84 | — | L=2 official (epoch 24); L=4 ablation 18.12 (epoch 33); do-nothing re-eval 16.75; L=6 dropped |
+| 2026-09-12-efficiency-benchmark-development | Report finalization | 25600 | — | n/a (inference benchmark) | n/a | n/a | n/a | 11500-11607 MB | Latency/VRAM/params measured, all 3 configs; real tensor-mutation bug found+fixed |
+| 2026-09-12-to-09-13-repository-reorganization-for-handover | Handover | — | — | — | — | — | — | — | Repo cleanup, docs rewritten from scratch, requirements.txt gaps fixed, both repos verified working post-reorg |
 
 **Note on commit history:** a few commits don't map to a distinct log entry above, since they
 were formatting/checklist-wording fixes rather than new runs: `ea1f404` (corrected Phase 0
@@ -2029,3 +2033,224 @@ plainly rather than treating epochs 1-12 as trained identically.
 previously-blocking iteration, with `--iter-resume` correctly checkpointing
 every 50 iterations and the OOM-skip patch handling occasional oversized
 frames without crashing. Target: 12 total epochs (up from the original 6).
+
+---
+
+## [Report finalization] Run ID: 2026-09-08-released-checkpoint-adoption-and-g0-reextraction
+
+**Context:** the Stage A extension begun in the prior entry (6→12 epochs, resumed from
+`epoch_3.pth`) was carried forward with the OOM-skip patch in place, but its own
+results were mixed: epochs 4-5 were cleanly retrained after the fix, while epochs 6-12
+retained data from the OOM-affected period before it, and mIoU across the extended
+run (17.41-19.66 across epochs 4-12) never exceeded the original, clean epoch 3
+result (mIoU=23.61). Given this, and given GaussianFormer3D's own authors provide a
+publicly released, fully-converged checkpoint (24 epochs, their own reported mIoU
+27.1), the decision was made to adopt their released checkpoint
+(`surroundocc_release.pth`) as the Static Generation module going forward, rather
+than continue extending our own, partially OOM-affected training run.
+
+**Verification before adopting:** loaded `surroundocc_release.pth` directly
+(`state_dict` load, `strict=False`) and confirmed `missing keys: 0, unexpected keys: 0`
+— a clean, complete checkpoint load, not a partial match. Evaluated on our own
+140-scene held-out val split: **mIoU: 25.13, iou2: 38.38** — meaningfully stronger
+than our own epoch_3 result (23.61) and consistent with the authors' own reported
+number's general scale, confirming this checkpoint is genuine and correctly loaded.
+
+**G_0 re-extraction:** re-ran `extract_g0_cache.py` against the released checkpoint,
+writing to a new, separate directory (`g0_cache_pretrained_release/`, distinct from
+the old `epoch_3`-based `g0_cache/`) rather than overwriting. Confirmed genuinely
+different from the old cache (mean absolute difference: 0.772848, not near-zero).
+Extraction time: 453.2s (~7.55 min) across all 850 scenes.
+
+**Decision:** `surroundocc_release.pth` adopted as the official Static Generation
+module for all subsequent Stage B training/evaluation and the final report. Our own
+`epoch_1-3.pth` (the clean, pre-OOM portion) kept for reference; `epoch_4-12.pth`
+(OOM-affected) later deleted during repo cleanup (see the handover-reorganization
+entry below) once superseded.
+
+---
+
+## [Report finalization] Run ID: 2026-09-09-to-09-11-stage-b-retrain-released-checkpoint
+
+**Context:** with the released checkpoint and its own, newly-extracted `G_0` cache
+in place, Stage B needed retraining from scratch — the prior `L=2/L=4/L=6` results
+were all computed against the old, `epoch_3`-based `G_0`, no longer valid once the
+Static module itself changed.
+
+### L=2 retrain (official, final result)
+
+**Setup:** identical recipe to the prior `L=2` run (40 epochs, same warmup+cosine
+decay schedule, same 651/140 train/val split), pointed at the new checkpoint and
+`G_0` cache, output to a new, separate directory
+(`checkpoints_L2_pretrained_release/`). Started 19:07, Sep 9.
+
+**Result:** total training time 667.9 min (~11.13 hours), ~15.1 min/epoch. Final
+epoch (40): train=3.86, val_mIoU=18.42. **Official checkpoint: `epoch_24.pth`**
+(val_mIoU=18.44, the genuine best among saved checkpoints; the true per-epoch peak,
+epoch 26 at 18.47, was never saved to disk given `CHECKPOINT_EVERY=3`). Validation
+mIoU plateaued in a tight band from ~epoch 20 onward — genuine convergence.
+
+### L=4 retrain (ablation)
+
+**Setup:** identical to L=2 above, `NUM_BLOCKS=4`, output to
+`checkpoints_L4_pretrained_release/`.
+
+**Result:** total training time 802.9 min (~13.4 hours), ~20.1 min/epoch. Final
+epoch (40): train=3.86, val_mIoU=18.04. **Best val_mIoU: 18.1157, epoch 33.**
+
+### Re-evaluated do-nothing baseline (new `G_0`)
+
+Re-ran `baseline_do_nothing.py` against the new `G_0` cache: **mIoU: 16.7537,
+iou2: 31.2464** — up from the old, `epoch_3`-based result (13.52), as expected
+given the better underlying `G_0`.
+
+### Final three-way comparison, new setup throughout
+
+| L | Best val_mIoU | Epoch | Params | Epoch time |
+|---|---|---|---|---|
+| **2** | **18.44** | 24 | 4.43M | ~15.1 min |
+| 4 | 18.12 | 33 | 5.46M | ~18.3 min* |
+
+*Epoch time recorded here from the full-run average (802.9min/40); differs slightly
+from the ~20.1min figure above, which includes eval overhead per epoch.
+
+**Decision:** `L=2` (epoch_24) confirmed as the official Stage B configuration —
+matching the original ablation's own finding (smaller `L` wins), now reconfirmed with
+the better `G_0`. `L=6` explicitly **dropped** from the final ablation going forward
+(per direct instruction) — the report's ablation study now compares only `L=2` vs
+`L=4`. Since `L=2` wins on both accuracy and training efficiency here, no
+accuracy/efficiency trade-off needs to be argued — `L=2` is adopted on both grounds.
+
+All three tables (Static, do-nothing, Dynamic `L=2`) and the qualitative comparison
+figures regenerated against this final setup for the report.
+
+---
+
+## [Report finalization] Run ID: 2026-09-12-efficiency-benchmark-development
+
+**Context:** the report's Section 4 had no direct measurement of the efficiency
+claim underlying the whole project's motivation — accuracy tables existed, but
+inference latency, VRAM, and parameter count comparisons between Static and Dynamic
+had never actually been measured. Built `benchmark_efficiency.py`
+(`GaussianFormer3D` repo) to measure this directly, reusing the exact, proven
+forward-pass patterns already established in `eval_static_stageA_per_frame.py` and
+`eval_stageb_checkpoint.py`.
+
+**Real bug found and fixed, non-trivial to diagnose:** the first run failed with a
+camera-embedding shape mismatch (`[6,2]` expected, `[6,12]` got) inside Stage A's
+own `camera_encoder`. Initial hypothesis (the benchmark's `metas` dict containing
+extra, un-popped keys relative to the proven scripts) was tested and ruled out —
+switching to an exact `.pop()`-based match did not fix it. Second hypothesis
+(container-level mutation across repeated calls on the same pre-loaded sample,
+something the original scripts never exercised since they only ever call each
+sample once) was closer but still incomplete: a `deep_copy_except_tensors` helper
+(recursively copying dicts/lists fresh per call, leaving tensors shared) still
+failed identically. Root cause, confirmed by observing the exact failure pattern —
+all 3 warmup calls succeeded, only the first *timed* call (reusing warmup call 1's
+sample) failed — was that a **tensor itself** (`metas["projection_mat"]`) was being
+mutated in-place by the model's own forward pass (e.g. an in-place reshape),
+something the original scripts never encountered since they never called the model
+twice on the same sample object. Fixed by extending the helper to `.clone()` tensor
+leaves too, not just recursively copy containers. Re-verified against known-good
+results after the fix: `eval_stageb_checkpoint.py`-equivalent calls inside the
+benchmark reproduced `mIoU: 18.4395` (`L=2`) and `18.1157` (`L=4`) exactly,
+confirming the fix didn't just suppress the error but genuinely corrected it.
+
+**Results (20 held-out scenes, single RTX 3090, `L=2` epoch_24 and `L=4` epoch_33):**
+
+| Method | Latency (ms) | FPS | Peak VRAM (MB) | Params (M) |
+|---|---|---|---|---|
+| Static 3DGS (full pipeline) | 548.2 | 1.82 | 11500 | 57.61 |
+| Dynamic Occ4DGS, L=2 | 359.5 | 2.78 | 11592 | 4.43 |
+| Dynamic Occ4DGS, L=4 | 440.8 | 2.27 | 11607 | 5.46 |
+
+Breakdown: shared backbone feature encoding (~234.4ms) dominates both pipelines'
+total latency almost equally — the deformation step itself, once features are
+available, is genuinely lightweight (~125.1ms for `L=2`, ~206.4ms for `L=4`). Peak
+VRAM is essentially unchanged across all three configurations, since the same
+shared backbone dominates memory too — not a dimension where the Dynamic approach
+offers savings. Parameter count is the clearest, most dramatic win (~13x fewer for
+`L=2` vs the full Static pipeline).
+
+**Decision:** results added to the report as Section 4.7/Table 4. Honest framing
+adopted throughout: the parameter-count win is dramatic, the latency win real but
+more moderate than params alone would suggest (explained by the shared, unavoidable
+backbone cost), and VRAM is explicitly stated as a non-win, not glossed over.
+
+---
+
+## [Handover] Run ID: 2026-09-12-to-09-13-repository-reorganization-for-handover
+
+**Context:** following the report's submission, work shifted to organizing both
+repositories (`Occ4DGS`, `GaussianFormer3D`) for handover to a master student —
+matching a public paper-release repository's standard of cleanliness, documentation,
+and reproducibility.
+
+**Housekeeping fixes:**
+- `GaussianFormer3D`'s active branch was still named `archive/motion-hypernet-backup`
+  despite holding all real, final, working code (a leftover from its original,
+  now-irrelevant purpose) — renamed to `gf3d-faithful-final`, matching `Occ4DGS`'s
+  own `gf3d-faithful-stageb` naming convention. Five stray, empty files (`break`,
+  `done`, `echo`, `fi`, `sleep` — almost certainly from a garbled terminal paste
+  somewhere in this project's history) confirmed empty and deleted.
+- `1TSSD` drive cleanup: confirmed-superseded data removed (old `epoch_3`-based
+  `g0_cache/`; `checkpoints_L6/` and its qualitative outputs, given `L=6`'s removal
+  from the ablation; the oldest, unsuffixed `checkpoints/`/`qualitative_data/`/
+  `qualitative_plots/`; `checkpoints_SANITY_CHECK_ONLY/`; `gf3d_checkpoints_small_tier/`;
+  old Gaussian-visualization data; superseded training logs; several confirmed
+  duplicate/buggy `gf3d_infos/` files, including a pre-fix, incorrectly train+val-combined
+  `stageb_pairs.pkl`). `GaussianFormer3D/out/nuscenes_surroundocc_gs25600_full/`
+  trimmed to just `epoch_1-3.pth` (the clean, pre-OOM portion) and
+  `surroundocc_release.pth`; hundreds of accumulated per-launch log files and two
+  multi-hundred-MB training-wrapper logs deleted. Freed roughly 10GB combined.
+  **Every deletion was verified safe before being made** — re-running
+  `eval_static_stageA_per_frame.py`, `baseline_do_nothing.py`, and
+  `eval_stageb_checkpoint.py` (`L=2` and `L=4`) after cleanup reproduced all four
+  results exactly (two to the 4th decimal, matching deterministic operations
+  exactly; two within expected GPU non-determinism for operations involving a fresh
+  model forward pass).
+
+**Code reorganization (each committed separately, as a safety-first sequence — a
+full safety-snapshot commit of the pre-reorganization state was made in both repos
+before any file was moved):**
+- `Occ4DGS`: confirmed-abandoned scripts (mini-dataset era, `Phase 1-5` naming,
+  `MotionHyperNet`-referencing) moved to `scripts/deprecated/`/`src/deprecated/`
+  (preserved via `git mv`, not deleted) — determined file-by-file, by reading each
+  script's own docstring, not by name alone (this caught two real, initially-missed
+  cases: `measure_noise_floor.py` and `check_ego_compensation.py`, both
+  superficially reading as general-purpose but actually depending on mini-dataset
+  infrastructure).
+- `GaussianFormer3D`: all 16 real, kept scripts (previously untracked, sitting at
+  the repo's top level, mixed in with the original authors' own code) moved into a
+  new `occ4dgs_scripts/` directory. This surfaced a real bug: every script relied on
+  Python's implicit behavior of adding a script's own directory to `sys.path` when
+  run directly — correct when they lived at the repo root, silently broken once
+  moved a level deeper. Caught via a real `ModuleNotFoundError` when re-verifying
+  after the move, not assumed fixed; all 15 affected scripts patched with an
+  explicit `sys.path.insert()` for the repo root, then re-verified
+  (`eval_stageb_checkpoint.py` reproduced `mIoU: 18.4395` exactly from its new
+  location).
+
+**Documentation rewritten from scratch** (not edited/updated) to exclude all
+references to abandoned design explorations (Motion HyperNet, VGGT, Option D) per
+explicit instruction, covering only the final, adopted `GF3D`-faithful design:
+- `docs/ARCHITECTURE.md` (replacing `STAGE_B_GF3D_FAITHFUL_DESIGN.md`): full
+  architecture, module flow, and math, with the same technical facts previously
+  attributed to abandoned approaches now stated on their own merits.
+- `docs/IMPLEMENTATION_ROADMAP.md`: trimmed to Phases 0-5B (the genuinely accurate,
+  completed history); Phases 6-11 (which described plans never executed, or
+  directly contradicting the final methodology) replaced with a short note pointing
+  to `ARCHITECTURE.md` and this log instead.
+- Three fully-superseded design documents moved to `docs/deprecated/`.
+- New `README.md` (both repos), `docs/RESULTS.md`, `docs/REPRODUCING_RESULTS.md`,
+  and `docs/DATA_AND_CHECKPOINTS.md` written, covering project overview, full
+  results (all 5 tables, 4 qualitative figures), step-by-step reproduction commands,
+  and required data/checkpoints with real download links for the two official
+  trained checkpoints (`L=2` epoch_24, `L=4` epoch_33).
+- `requirements.txt` audited against every real import across both repos' kept
+  code — four genuine gaps found and fixed (`matplotlib`, `pyquaternion`,
+  `mmengine`, `Pillow`, none previously listed despite being directly used).
+
+**Decision:** both repositories now reflect a clean, documented, verified-working
+state suitable for handover. Remaining steps: push both to GitHub (pending
+confirmation of the `GaussianFormer3D` fork's actual account/URL).

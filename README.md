@@ -1,18 +1,24 @@
-# Occ4DGS: Feedforward Online Dynamic 3D Gaussian Splatting for Occupancy Prediction
+# Occ4DGS: Feed-Forward Online Dynamic 3D Gaussian Splatting for Occupancy Prediction
 
 **A feedforward, online alternative to per-frame Gaussian reconstruction for 3D semantic occupancy prediction in autonomous driving.**
 
-CCU Autonomous Driving Perception Lab, advised by Prof. Jui-Chiu (Rachael) Chiang.
+> La Min Maung, advised by Prof. Jui-Chiu (Rachael) Chiang
+> CCU Autonomous Driving Perception Lab, National Chung Cheng University
 
 ---
 
 ![Architecture](docs/assets/architecture.jpg)
 
+## News
+- **[2026/09/20]** Internship concludes.
+- **[2026/09/13]** Final report submitted.
+- **[2026/04/20]** Internship begins.
+
 ## Overview
 
 Dense 3D semantic occupancy prediction is important for safe autonomous driving. Recent methods represent a scene as a sparse, object-centric set of 3D Gaussians rather than a dense voxel grid — but reconstruct this representation entirely from scratch on every frame, treating each frame as an independent, static scene.
 
-**Occ4DGS** instead proposes a feedforward, online dynamic Gaussian representation: a **Static Gaussian Generation** module reconstructs a scene once, from its first frame, reusing [GaussianFormer3D](https://github.com/NVlabs/GaussianFormer3D)'s own real reconstruction pipeline unchanged. A lightweight **Dynamic Deformation** module then propagates this representation forward in time, updating it for every subsequent frame as it arrives by predicting the scene's own residual motion — without re-running full reconstruction or requiring future frames.
+**Occ4DGS** instead proposes a feedforward, online dynamic Gaussian representation: a **Static Gaussian Generation** module reconstructs a scene once, from its first frame, reusing [GaussianFormer3D](https://github.com/LaMinMaung193/GaussianFormer3D)'s own real reconstruction pipeline unchanged. A lightweight **Dynamic Deformation** module then propagates this representation forward in time, updating it for every subsequent frame as it arrives by predicting the scene's own residual motion — without re-running full reconstruction or requiring future frames.
 
 See [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) for the complete architecture, module-by-module flow, and formal math.
 
@@ -30,13 +36,11 @@ The Dynamic Deformation module improves meaningfully over the do-nothing baselin
 
 See [`docs/RESULTS.md`](docs/RESULTS.md) for full per-class breakdowns, the complete efficiency benchmark, the ablation study, and qualitative comparisons across four representative scenes.
 
-## Companion Repository
+## Getting Started
 
-Stage A (Static Gaussian Generation) and all real training/evaluation/benchmarking scripts for Stage B run against a modified fork of GaussianFormer3D:
+This project involves two repositories: this one (Occ4DGS, the primary project) and a modified fork of [GaussianFormer3D](https://github.com/LaMinMaung193/GaussianFormer3D), which provides Stage A (Static Gaussian Generation) and holds the real Stage B training/evaluation/benchmarking scripts in its own `occ4dgs_scripts/` directory. Clone both.
 
-**[GaussianFormer3D (modified fork)](../GaussianFormer3D)** — see its own `README.md` and `occ4dgs_scripts/` directory.
-
-## Installation
+### Installation
 
 ```bash
 conda create -n gf3d python=3.8
@@ -44,19 +48,43 @@ conda activate gf3d
 pip install -r requirements.txt
 ```
 
-This project also requires a working [GaussianFormer3D](../GaussianFormer3D) installation (its own `README.md`/`docker/` cover its specific dependencies — mmdet3d, mmcv, spconv, DFA3D).
+`GaussianFormer3D` has its own, additional dependencies (mmdet3d, mmcv, spconv, DFA3D) — see its own `README.md`/`docker/` for setup.
 
-## Data and Checkpoints
+### Data Preparation
 
-See [`docs/DATA_AND_CHECKPOINTS.md`](docs/DATA_AND_CHECKPOINTS.md) for the full list of required data files and trained checkpoints, with download links and expected directory layout.
+This project requires the nuScenes dataset, SurroundOcc occupancy annotations, and several derived/cached files (dataset info `.pkl`s, the released Stage A checkpoint, generated depth ground-truth, and the cached `G_0` Gaussian representations). See [`docs/DATA_AND_CHECKPOINTS.md`](docs/DATA_AND_CHECKPOINTS.md) for the complete file list, download links, and expected directory layout.
 
-## Reproducing the Results
+### Quick Evaluation
 
-See [`docs/REPRODUCING_RESULTS.md`](docs/REPRODUCING_RESULTS.md) for exact, step-by-step commands covering:
-1. Extracting the cached `G_0` (Static Gaussian Generation output) for every scene
-2. Training the Dynamic Deformation module
-3. Evaluating all three reported configurations (Static, do-nothing, Dynamic)
-4. Generating the report's qualitative figures and efficiency benchmark
+Once data is in place, the fastest way to confirm the setup works is reproducing the do-nothing baseline (Table 2), then the Dynamic Deformation module's own result on top of it (Table 3):
+
+```bash
+# Do-nothing baseline (Table 2) -- from Occ4DGS
+cd Occ4DGS
+python scripts/baseline_do_nothing.py
+```
+
+Expected result: `mIoU: 16.75`.
+
+```bash
+# Occ4DGS (ours), Dynamic Deformation, L=2 (Table 3) -- from GaussianFormer3D
+cd ../GaussianFormer3D
+python occ4dgs_scripts/eval_stageb_checkpoint.py \
+    --checkpoint <path-to-checkpoints_L2/epoch_24.pth> \
+    --num_blocks 2 \
+    --out /tmp/eval_L2.json
+```
+
+Expected result: `mIoU: 18.44` — the deformation module's real improvement over the do-nothing baseline above.
+
+### Training
+
+```bash
+cd Occ4DGS
+python scripts/train_stageb.py
+```
+
+**For the complete, step-by-step guide** — extracting `G_0`, training, evaluating all three configurations, and generating the report's qualitative figures and efficiency benchmark — see [`docs/REPRODUCING_RESULTS.md`](docs/REPRODUCING_RESULTS.md).
 
 ## Repository Structure
 
@@ -92,13 +120,17 @@ Occ4DGS/
 └── requirements.txt
 ```
 
+## Related Projects
+
+This project builds directly upon [GaussianFormer3D](https://github.com/NVlabs/GaussianFormer3D) (Zhao et al., ICRA 2026), reusing its reconstruction pipeline and 3D deformable attention mechanism unchanged for the Static Gaussian Generation stage. GaussianFormer3D itself builds upon [GaussianFormer](https://github.com/huang-yh/GaussianFormer), [BEVFormer](https://github.com/fundamentalvision/bevformer), [BEVDepth](https://github.com/megvii-basedetection/bevdepth), and [DFA3D](https://github.com/IDEA-Research/3D-deformable-attention). We sincerely thank the authors of all these works for their contributions to the community.
+
 ## Citation
 
 If you find this work useful, please consider citing:
 
 ```bibtex
 @techreport{maung2026occ4dgs,
-  title  = {Occ4DGS: Feed-Forward Online Dynamic 3D Gaussian Splatting for
+  title  = {Occ4DGS: Feedforward Online Dynamic 3D Gaussian Splatting for
             Occupancy Prediction in Autonomous Driving},
   author = {Maung, La Min},
   institution = {National Chung Cheng University},
@@ -108,4 +140,4 @@ If you find this work useful, please consider citing:
 
 ## Acknowledgements
 
-This work reuses [GaussianFormer3D](https://github.com/NVlabs/GaussianFormer3D)'s own reconstruction pipeline and 3D deformable attention mechanism directly for the Static Gaussian Generation stage. This project was supported by the College of Engineering, National Chung Cheng University, Taiwan.
+This work was supported by the College of Engineering, National Chung Cheng University, Taiwan, Republic of China.

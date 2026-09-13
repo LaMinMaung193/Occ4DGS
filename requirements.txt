@@ -9,6 +9,7 @@ mmcv==2.1.0
 mmdet==3.2.0
 mmsegmentation==1.2.1
 mmdet3d==1.3.0
+mmengine
 spconv-cu120
 timm
 ftfy
@@ -32,6 +33,9 @@ pyyaml
 wandb
 tqdm
 open3d                # for Gaussian position scatter-plot sanity checks (Phase 2/4)
+matplotlib
+pyquaternion
+Pillow
 
 # Custom CUDA extensions (installed via `pip install -e .`, not listed here as
 # pinned versions since they're built from source — see EXPERIMENT_LOG.md for

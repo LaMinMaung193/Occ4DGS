@@ -126,7 +126,7 @@ $$\text{anchor}^{(0)}_i = \text{concat}(\mu_i, s_i, r_i, \alpha_i, c_i) \quad \t
 ### 3.2 Query and Anchor Initialization
 
 $$Q^{(0)} = \text{InstanceFeatureEmbedding} \quad \text{(fixed, learned, per-slot; independent of anchor)}$$
-$$\text{anchor\_embed}^{(0)} = \text{AnchorEncoder}(\text{anchor}^{(0)})$$
+$$\text{anchorEmbed}^{(0)} = \text{AnchorEncoder}(\text{anchor}^{(0)})$$
 
 ### 3.3 Frame Transform Before Projection
 
@@ -145,10 +145,10 @@ Before the anchor is passed into the deformable attention module, a
 transient (not persisted) copy of both its position and rotation is
 transformed:
 
-$$T = \text{compute\_relative\_transform}(\text{pose}_{prev}, \text{pose}_{curr})$$
+$$T = \text{computeRelativeTransform}(\text{pose}_{prev}, \text{pose}_{curr})$$
 $$\mu_i^{(\text{proj})} = T \cdot [\mu_i, 1]^T$$
-$$q_{\text{rel}} = \text{rotmat\_to\_quat}(T[:3,:3])$$
-$$r_i^{(\text{proj})} = \text{quat\_multiply}(q_{\text{rel}}, r_i)$$
+$$q_{\text{rel}} = \text{rotmatToQuat}(T[:3,:3])$$
+$$r_i^{(\text{proj})} = \text{quatMultiply}(q_{\text{rel}}, r_i)$$
 
 Only the transient, projection-input copy is affected — $G_{t-1}$'s actual
 stored $\mu_i$, $r_i$ are never reassigned to a new frame; this transform is
@@ -157,16 +157,16 @@ of the buffer's own stored state.
 
 ### 3.4 Per-Block Iteration, $l = 1..L$
 
-$$Q_{\text{cat}}^{(l)} = \text{DeformableFeatureAggregation3D}(Q^{(l-1)}, \text{anchor}^{(l-1)}, \text{anchor\_embed}^{(l-1)}, F^c_t, F^d_t, \text{metas})$$
+$$Q_{\text{cat}}^{(l)} = \text{DeformableFeatureAggregation3D}(Q^{(l-1)}, \text{anchor}^{(l-1)}, \text{anchorEmbed}^{(l-1)}, F^c_t, F^d_t, \text{metas})$$
 
 $$Q^{(l)} = \text{LayerNorm}(\text{FFN}(Q_{\text{cat}}^{(l)}))$$
 
-$$\Delta\mu_i^{(l)} = \Phi_\mu(Q_i^{(l)}, \text{anchor\_embed}_i^{(l-1)}), \qquad \Delta r_i^{(l)} = \Phi_r(Q_i^{(l)}, \text{anchor\_embed}_i^{(l-1)})$$
+$$\Delta\mu_i^{(l)} = \Phi_\mu(Q_i^{(l)}, \text{anchorEmbed}_i^{(l-1)}), \qquad \Delta r_i^{(l)} = \Phi_r(Q_i^{(l)}, \text{anchorEmbed}_i^{(l-1)})$$
 
 $$\text{anchor}^{(l)}_\mu = \text{anchor}^{(l-1)}_\mu + \Delta\mu_i^{(l)}$$
-$$\text{anchor}^{(l)}_r = \text{normalize}(\text{quat\_multiply}(\text{anchor}^{(l-1)}_r, \Delta r_i^{(l)})) \quad \text{(current-first)}$$
+$$\text{anchor}^{(l)}_r = \text{normalize}(\text{quatMultiply}(\text{anchor}^{(l-1)}_r, \Delta r_i^{(l)})) \quad \text{(current-first)}$$
 $$\text{anchor}^{(l)}_s, \text{anchor}^{(l)}_\alpha, \text{anchor}^{(l)}_c = \text{anchor}^{(l-1)}_s, \text{anchor}^{(l-1)}_\alpha, \text{anchor}^{(l-1)}_c \quad \text{(frozen)}$$
-$$\text{anchor\_embed}^{(l)} = \text{AnchorEncoder}(\text{anchor}^{(l)})$$
+$$\text{anchorEmbed}^{(l)} = \text{AnchorEncoder}(\text{anchor}^{(l)})$$
 
 ### 3.5 Final Update
 

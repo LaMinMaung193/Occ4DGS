@@ -34,7 +34,7 @@ and what gets committed — they are the same anchor, throughout.
 
 **Step 2 — Outer Product / KV construction (reused, unchanged).** $F^{3D} =
 F^d \otimes F^c$ describes what `DeformableFeatureAggregation3D`'s CUDA kernel
-achieves functionally, not a separate, materialized step. $F^c_t$/$F^d_t$ are
+achieves functionally, not a separate, materialized step. $F^c_t / F^d_t$ are
 passed directly into Step 4 as `feature_maps`/`dpt_feature_maps`.
 
 **Step 3 — Query and anchor construction.** Two tensors feed every block, each
@@ -172,8 +172,8 @@ $$\text{anchorEmbed}^{(l)} = \text{AnchorEncoder}(\text{anchor}^{(l)})$$
 
 $$G_t = \text{anchor}^{(L)}$$
 
-That is: $\mu_{t,i} = \text{anchor}^{(L)}_{\mu,i}$, $r_{t,i} = \text{anchor}^{(L)}_{r,i}$,
-$s_{t,i} = s_{t-1,i}$, $\alpha_{t,i} = \alpha_{t-1,i}$, $c_{t,i} = c_{t-1,i}$.
+That is: $\mu_{t,i} = \mu_i^{(L)}$, $r_{t,i} = r_i^{(L)}$,
+$s_{t,i} = s_{t-1,i}$, $\alpha_{t,i} = \alpha_{t-1,i}$, $c_{t,i} = c_{t-1,i}$ (where $\mu_i^{(L)}$, $r_i^{(L)}$ are the final block's own anchor position/rotation).
 
 No separate final-commit step is needed: there is no distinction between
 "what grounded the last block's search" and "what gets committed" — they are

@@ -103,9 +103,8 @@ Occ4DGS/
 │   ├── datasets/                    # Dataset adapters and StageBTrainingDataset
 │   ├── models/stage_b_temporal/     # Dynamic Deformation module (buffer, encoder,
 │   │                                #   deformation heads, transforms)
-│   ├── losses/
-│   ├── eval/
-│   └── deprecated/                  # Superseded, pre-final-design code
+│   └── deprecated/                  # Superseded/unfinished code (losses, eval,
+│                                     #   training stubs, mini-dataset-era modules)
 ├── scripts/
 │   ├── baseline_do_nothing.py       # Do-nothing baseline evaluation
 │   ├── train_stageb.py              # Dynamic Deformation training loop

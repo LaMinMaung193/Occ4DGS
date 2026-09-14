@@ -1,6 +1,6 @@
 """
-Deformation heads Phi_mu, Phi_r (design_doc_v2.md Sec 2.5), the buffer
-update rule (Sec 2.6), and ego-motion compensation utilities.
+Deformation heads Phi_mu, Phi_r and the buffer update rule (see
+docs/ARCHITECTURE.md Section 3.4), and ego-motion compensation utilities.
 
     Delta_mu_t^i = Phi_mu(z_t^i)
     Delta_r_t^i  = Phi_r(z_t^i)        # small rotation quaternion, via
@@ -203,7 +203,7 @@ def apply_update_rule(
     spawn_opacity: torch.Tensor = None,
     spawn_semantics: torch.Tensor = None,
 ) -> GaussianState:
-    """design_doc_v2.md Sec 2.6's update rule. prev_state is read from the
+    """docs/ARCHITECTURE.md Section 3.4's update rule. prev_state is read from the
     buffer (G_{t-1}); returns the new G_t.
 
     Three ways out-of-range Gaussians can be handled, in order of sophistication:

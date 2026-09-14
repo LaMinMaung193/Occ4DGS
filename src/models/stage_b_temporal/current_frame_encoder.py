@@ -3,7 +3,7 @@ src/models/stage_b_temporal/current_frame_encoder.py
 
 Phase 5: standalone per-frame encoder for Stage B's temporal unroll. Wraps
 BEVSegmentorLiDAR3D's img_backbone / img_neck / pts_dpt_head directly (frozen, reused
-verbatim per design_doc_v2.md Section 1.2 / Section 2.2), replicating the exact call
+verbatim -- see docs/ARCHITECTURE.md), replicating the exact call
 order and tensor reshaping in GaussianFormer3D's own extract_img_dpt_feat() /
 extract_multiscale_dpt() (model/segmentor/bev_segmentor_lidar_3d.py) -- but calling the
 three submodules directly rather than calling those two methods verbatim.

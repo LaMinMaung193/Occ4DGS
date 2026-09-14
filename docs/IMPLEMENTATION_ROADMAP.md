@@ -25,7 +25,7 @@ our own module (`src/models/stage_a_gaussianformer3d/`). In practice we reuse Ga
    `Python 3.8 / CUDA 12.8 / spconv 2.3.6` stack.
 3. Freeze the resolved working versions into `requirements.txt` (replace the `TBD` placeholders).
 4. Verify all 10 `v1.0-mini` scene names exist as folders in `data/occ3d/gts/` (§2 of
-   `dataset_compute_addendum.md`). Write this as `scripts/verify_scene_coverage.py`.
+   `docs/deprecated/dataset_compute_addendum.md`). Write this as `scripts/verify_scene_coverage.py`.
 5. Confirm `pc_range`/voxel size alignment between your intended Stage A voxelization and the
    Occ3D grid (`configs/dataset_mini_occ3d.yaml`).
 6. Symlink `data/nuscenes_mini -> /media/user/Transcend/nuScenes/v1.0-mini` and

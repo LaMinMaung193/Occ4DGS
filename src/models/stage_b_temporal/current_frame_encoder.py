@@ -47,7 +47,7 @@ silently diverging:
    standalone -- see EXPERIMENT_LOG.md Phase 5 bridge finding #3), so nothing here needs
    raw LiDAR points at all.
 
-Input shapes match to_batch_of_one()'s output (scripts/run_stage_a_frame0.py) exactly:
+Input shapes match to_batch_of_one()'s output (scripts/deprecated/run_stage_a_frame0.py) exactly:
     imgs: (B, N_cam=6, C=3, H, W) float32, already normalized + padded by the pipeline
     dpt:  (B, N_cam=6, 1, H, W) float32, or None
     metas["projection_mat"]: (B, N_cam=6, 4, 4) float32

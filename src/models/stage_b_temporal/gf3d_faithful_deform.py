@@ -2,7 +2,7 @@
 src/models/stage_b_temporal/gf3d_faithful_deform.py
 
 GF3D-faithful Stage B deformation module (Design B, cascaded), implementing
-docs/STAGE_B_GF3D_FAITHFUL_DESIGN.md Sections 3.4-3.5.
+docs/ARCHITECTURE.md Sections 3.4-3.5.
 
 Reuses GaussianFormer3D's own real DeformableFeatureAggregation3D, AnchorEncoder
 (SparseGaussian3DEncoder), FFN, and LayerNorm directly via the same registry-based

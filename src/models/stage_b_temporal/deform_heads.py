@@ -101,7 +101,7 @@ def transform_anchor_for_projection(
     Gaussian's actual, persisted mu/r (in the reference buffer) are never
     reassigned to a new frame; only this function's returned copies are.
 
-    Design doc: STAGE_B_GF3D_FAITHFUL_DESIGN.md, Section 3.3 (v4, resolved).
+    Design doc: docs/ARCHITECTURE.md, Section 3.3.
     Both position and rotation need this transform: kps_generator uses the
     anchor's rotation (not just position) to orient its sampling template, so
     leaving rotation unconverted while converting only position would build an

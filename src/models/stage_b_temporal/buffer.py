@@ -1,7 +1,7 @@
 """
 Reference buffer for Stage B's recursive temporal deformation.
 
-Semantics (design_doc_v2.md Sec 2.1, confirmed-recursive, NOT re-anchored):
+Semantics (confirmed-recursive, NOT re-anchored):
 
     buffer <- G_0                                   # after Stage A, once
     for t = 1 .. T:
@@ -10,9 +10,10 @@ Semantics (design_doc_v2.md Sec 2.1, confirmed-recursive, NOT re-anchored):
         buffer <- G_t                                 # write-back, recursive,
                                                         # never reset to G_0
 
-No periodic re-anchoring, no keyframe reset -- drift is handled at the
-training level via truncated BPTT (see design_doc_v2.md Sec 2.6), not by
-changing this module's behavior.
+No periodic re-anchoring, no keyframe reset. Drift across multiple steps is
+not yet addressed -- the current, single-step training scope never exercises
+this buffer's own recursive write-back beyond one step. See
+docs/ARCHITECTURE.md's Future Work section.
 """
 
 from dataclasses import dataclass
@@ -30,10 +31,10 @@ class GaussianState:
                                      unit-norm on entry/exit of every op
     scales:     (N, 3)              s_i
     opacities:  (N, 1)               alpha_i
-    semantics:  (N, semantic_dim)     c_i  (logits, per design_doc_v2.md)
+    semantics:  (N, semantic_dim)     c_i  (logits)
 
     scales/opacities/semantics are time-invariant under Stage B's update rule
-    (design_doc_v2.md Sec 2.6) -- only means and rotations are deformed.
+    (see docs/ARCHITECTURE.md Section 3.4) -- only means and rotations are deformed.
     """
 
     means: torch.Tensor
